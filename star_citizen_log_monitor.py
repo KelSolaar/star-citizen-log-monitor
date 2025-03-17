@@ -2,7 +2,9 @@
 # dependencies = [
 #   "aiofiles>=24,<25",
 #   "click>=8,<9",
+#   "pytz>=2025",
 #   "textual>=2,<3",
+#   "tzlocal>=5,<6",
 # ]
 # ///
 
@@ -17,11 +19,14 @@ with an emphasis put on extracting combat related data.
 import asyncio
 import re
 import traceback
+from datetime import datetime
 from functools import wraps
 from typing import Callable
 
 import aiofiles
 import click
+import pytz
+import tzlocal
 from rich.console import Console
 from rich.highlighter import RegexHighlighter
 from rich.theme import Theme
@@ -35,15 +40,18 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.1.7"
+__version__ = "0.2.0"
 
 __all__ = [
-    "PATTERN_TIMESTAMP",
+    "LOCAL_TIMEZONE",
+    "PATTERN_TIMESTAMP_RAW",
+    "PATTERN_TIMESTAMP_BEAUTIFIED",
     "PATTERN_NOTICE",
     "THEME_DEFAULT",
     "catch_exception",
     "Logger",
     "EventHighlighter",
+    "beautify_timestamp",
     "beautify_entity_name",
     "parse_event_on_client_spawned",
     "parse_event_connect_started",
@@ -56,9 +64,12 @@ __all__ = [
     "StarCitizenLogMonitorApp",
 ]
 
-PATTERN_TIMESTAMP = r"(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)"
+LOCAL_TIMEZONE = tzlocal.get_localzone()
 
-PATTERN_NOTICE = "<" + PATTERN_TIMESTAMP + ">" + r" \[Notice]\ "
+PATTERN_TIMESTAMP_RAW = r"(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)"
+PATTERN_TIMESTAMP_BEAUTIFIED = r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:AM|PM))"
+
+PATTERN_NOTICE = "<" + PATTERN_TIMESTAMP_RAW + ">" + r" \[Notice]\ "
 
 THEME_DEFAULT = Theme(
     {
@@ -102,7 +113,7 @@ class Logger(Log):
 class EventHighlighter(RegexHighlighter):
     base_style = "sclh."
     highlights = [
-        PATTERN_TIMESTAMP,
+        PATTERN_TIMESTAMP_BEAUTIFIED,
         r"(?P<classifier>Zone): (?P<zone>[\w_-]+),",
         r"(?P<classifier>Requester): (?P<requester>[\w_-]+)",
         # Actor Death
@@ -119,10 +130,19 @@ class EventHighlighter(RegexHighlighter):
     ]
 
 
+def beautify_timestamp(timestamp: str) -> str:
+    utc_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+    utc_timestamp = utc_timestamp.replace(tzinfo=pytz.UTC)
+
+    local_timestamp = utc_timestamp.astimezone(LOCAL_TIMEZONE)
+
+    return local_timestamp.strftime("%Y-%m-%d %I:%M:%S%p")
+
+
 def beautify_entity_name(name: str) -> str:
     if match := re.match(r"([\w_-]+)_\d{10,}$", name):
         return match.group(1)
-    
+
     return name
 
 
@@ -130,7 +150,7 @@ def beautify_entity_name(name: str) -> str:
 def parse_event_on_client_spawned(log_line: str) -> str:
     pattern = re.compile(
         "<"
-        + PATTERN_TIMESTAMP
+        + PATTERN_TIMESTAMP_RAW
         + "> "
         + r"\[CSessionManager::OnClientSpawned\] Spawned!"
     )
@@ -138,7 +158,7 @@ def parse_event_on_client_spawned(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        return f"{data['timestamp']} [Client Spawned]"
+        return f"{beautify_timestamp(data['timestamp'])} [Client Spawned]"
 
     return None
 
@@ -147,7 +167,7 @@ def parse_event_on_client_spawned(log_line: str) -> str:
 def parse_event_connect_started(log_line: str) -> str:
     pattern = re.compile(
         "<"
-        + PATTERN_TIMESTAMP
+        + PATTERN_TIMESTAMP_RAW
         + "> "
         + r"\[CSessionManager::ConnectCmd\] Connect started!"
     )
@@ -155,7 +175,7 @@ def parse_event_connect_started(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        return f"{data['timestamp']} [Connect Started]"
+        return f"{beautify_timestamp(data['timestamp'])} [Connect Started]"
 
     return None
 
@@ -164,7 +184,7 @@ def parse_event_connect_started(log_line: str) -> str:
 def parse_event_on_client_connected(log_line: str) -> str:
     pattern = re.compile(
         "<"
-        + PATTERN_TIMESTAMP
+        + PATTERN_TIMESTAMP_RAW
         + "> "
         + r"\[CSessionManager::OnClientConnected\] Connected!"
     )
@@ -172,7 +192,7 @@ def parse_event_on_client_connected(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        return f"{data['timestamp']} [Client Connected]"
+        return f"{beautify_timestamp(data['timestamp'])} [Client Connected]"
 
     return None
 
@@ -187,9 +207,7 @@ def parse_event_request_quit_lobby(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        return (
-            f"{data['timestamp']} [Request Quit Lobby] Requester: {data['requester']}"
-        )
+        return f"{beautify_timestamp(data['timestamp'])} [Request Quit Lobby] Requester: {data['requester']}"
 
     return None
 
@@ -205,7 +223,7 @@ def parse_event_actor_death(log_line: str) -> str:
         data = search.groupdict()
 
         return (
-            f"{data['timestamp']} [Actor Death] "
+            f"{beautify_timestamp(data['timestamp'])} [Actor Death] "
             f"Victim: {beautify_entity_name(data['victim'])}, "
             f"Killer: {beautify_entity_name(data['killer'])}, "
             f"Zone: {beautify_entity_name(data['zone'])}, "
@@ -226,7 +244,7 @@ def parse_vehicle_destruction(log_line: str) -> str:
         data = search.groupdict()
 
         return (
-            f"{data['timestamp']} [Vehicle Destruction] "
+            f"{beautify_timestamp(data['timestamp'])} [Vehicle Destruction] "
             f"Vehicle: {beautify_entity_name(data['vehicle_name'])}, "
             f"Driver: {beautify_entity_name(data['driver'])}, "
             f"Caused By: {beautify_entity_name(data['causer'])}, "
@@ -248,7 +266,7 @@ def parse_requesting_transition_event(log_line: str) -> str:
         data = search.groupdict()
 
         return (
-            f"{data['timestamp']} [Requesting Transition] "
+            f"{beautify_timestamp(data['timestamp'])} [Requesting Transition] "
             f"From: {data['from_system']} ({data['from_zone']}), "
             f"To: {data['to_system']} ({data['to_zone']})"
         )
