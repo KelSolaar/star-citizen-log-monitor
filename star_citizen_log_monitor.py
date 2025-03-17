@@ -35,7 +35,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.1.5"
+__version__ = "0.1.7"
 
 __all__ = [
     "PATTERN_TIMESTAMP",
@@ -120,7 +120,10 @@ class EventHighlighter(RegexHighlighter):
 
 
 def beautify_entity_name(name: str) -> str:
-    return next(iter(name.rsplit("_", 1)), name)
+    if match := re.match(r"([\w_-]+)_\d{10,}$", name):
+        return match.group(1)
+    
+    return name
 
 
 @catch_exception
