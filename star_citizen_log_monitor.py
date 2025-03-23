@@ -40,7 +40,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -60,6 +60,7 @@ __all__ = [
     "parse_event_actor_death",
     "parse_vehicle_destruction",
     "parse_requesting_transition_event",
+    "parse_event_actor_state_corpse",
     "EVENT_PARSERS",
     "StarCitizenLogMonitorApp",
 ]
@@ -67,7 +68,9 @@ __all__ = [
 LOCAL_TIMEZONE = tzlocal.get_localzone()
 
 PATTERN_TIMESTAMP_RAW = r"(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)"
-PATTERN_TIMESTAMP_BEAUTIFIED = r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:AM|PM))"
+PATTERN_TIMESTAMP_BEAUTIFIED = (
+    r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:AM|PM))"
+)
 
 PATTERN_NOTICE = "<" + PATTERN_TIMESTAMP_RAW + ">" + r" \[Notice]\ "
 
@@ -88,6 +91,9 @@ THEME_DEFAULT = Theme(
         "sclh.driver": "italic #FF69B4",
         "sclh.causedby": "italic #DC143C",
         "sclh.cause": "italic #A52A2A",
+        # Actor State Corpse
+        "sclh.corpse": "bold #DC143C",
+        "sclh.player": "italic #FF69B4",
     }
 )
 
@@ -127,6 +133,9 @@ class EventHighlighter(RegexHighlighter):
         r"(?P<classifier>Driver): (?P<driver>[\w_-]+),",
         r"(?P<classifier>Caused By): (?P<causedby>[\w_-]+),",
         r"(?P<classifier>Cause): (?P<cause>[\w_-]+),",
+        # Actor State Corpse
+        r"(?P<corpse>\[Corpse\])",
+        r"(?P<classifier>Player): (?P<player>[\w_-]+),",
     ]
 
 
@@ -274,6 +283,24 @@ def parse_requesting_transition_event(log_line: str) -> str:
     return None
 
 
+@catch_exception
+def parse_event_actor_state_corpse(log_line: str) -> str:
+    pattern = re.compile(
+        PATTERN_NOTICE
+        + r"<\[ActorState\] Corpse> \[ACTOR STATE\]\[SSCActorStateCVars::LogCorpse\] Player '(?P<player>[\w_-]+)' <remote client>: Running corpsify for corpse. \[Team_ActorTech\]\[Actor\]"
+    )
+
+    if search := pattern.search(log_line):
+        data = search.groupdict()
+
+        return (
+            f"{beautify_timestamp(data['timestamp'])} [Corpse] "
+            f"Player: {beautify_entity_name(data['player'])}, "
+        )
+
+    return None
+
+
 EVENT_PARSERS = [
     parse_event_on_client_spawned,
     parse_event_connect_started,
@@ -282,6 +309,7 @@ EVENT_PARSERS = [
     parse_event_actor_death,
     parse_vehicle_destruction,
     parse_requesting_transition_event,
+    parse_event_actor_state_corpse,
 ]
 
 
