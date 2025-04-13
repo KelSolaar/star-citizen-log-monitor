@@ -40,7 +40,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -61,6 +61,7 @@ __all__ = [
     "parse_vehicle_destruction",
     "parse_requesting_transition_event",
     "parse_event_actor_state_corpse",
+    "parse_event_actor_stall",
     "EVENT_PARSERS",
     "StarCitizenLogMonitorApp",
 ]
@@ -94,6 +95,8 @@ THEME_DEFAULT = Theme(
         # Actor State Corpse
         "sclh.corpse": "bold #DC143C",
         "sclh.player": "italic #FF69B4",
+        # Actor Stall
+        "sclh.actorstall": "bold orange1",
     }
 )
 
@@ -136,6 +139,8 @@ class EventHighlighter(RegexHighlighter):
         # Actor State Corpse
         r"(?P<corpse>\[Corpse\])",
         r"(?P<classifier>Player): (?P<player>[\w_-]+),",
+        # Actor Stall
+        r"(?P<actorstall>\[Actor Stall\])",
     ]
 
 
@@ -300,6 +305,21 @@ def parse_event_actor_state_corpse(log_line: str) -> str:
 
     return None
 
+@catch_exception
+def parse_event_actor_stall(log_line: str) -> str:
+    pattern = re.compile(
+        r"<(?P<timestamp>[\d\-T:.Z]+)> \[Notice\] <Actor stall> Actor stall detected, Player: (?P<player>[\w_-]+), Type: (?P<type>\w+), Length: (?P<length>[\d.]+)\. \[Team_ActorTech\]\[Actor\]"
+    )
+
+    if search := pattern.search(log_line):
+        data = search.groupdict()
+
+        return (
+            f"{beautify_timestamp(data['timestamp'])} [Actor Stall] "
+            f"Player: {beautify_entity_name(data['player'])}, "
+        )
+
+    return None
 
 EVENT_PARSERS = [
     parse_event_on_client_spawned,
@@ -310,6 +330,7 @@ EVENT_PARSERS = [
     parse_vehicle_destruction,
     parse_requesting_transition_event,
     parse_event_actor_state_corpse,
+    parse_event_actor_stall,
 ]
 
 
