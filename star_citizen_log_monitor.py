@@ -48,7 +48,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -410,7 +410,7 @@ async def parse_event_actor_stall(log_line: str) -> str:
         if organization := await extract_organization_name(player):
             player = f"{player} ({organization})"
 
-        return f"{beautify_timestamp(data['timestamp'])} [Actor Stall] Player: {player}, Distance: {round(float(data['length']), 1)}"
+        return f"{beautify_timestamp(data['timestamp'])} [Actor Stall] Player: {player}, Length: {round(float(data['length']), 1)}"
 
     return None
 
