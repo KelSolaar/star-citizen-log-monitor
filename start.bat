@@ -1,5 +1,5 @@
 Rem Paste your path to the star citizen LIVE game directory (replace this with the PTU if needed)
-set SC_DIR=H:\Roberts Space Industries\StarCitizen\LIVE
+set SC_DIR=C:\Program Files\Roberts Space Industries\StarCitizen\LIVE
 set UV_PATH=%HOMEDRIVE%%HOMEPATH%\.local\bin\uv
 
 Rem Ensure uv is installed
