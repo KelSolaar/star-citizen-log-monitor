@@ -20,6 +20,7 @@ with an emphasis put on extracting combat related data.
 """
 
 import asyncio
+import os
 import re
 import time
 import traceback
@@ -48,7 +49,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.4.2"
+__version__ = "0.6.0"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -429,10 +430,13 @@ EVENT_PARSERS = [
 
 
 class StarCitizenLogMonitorApp(App):
-    def __init__(self, log_file_path: str):
+    def __init__(self, log_file_path: str, show_parsed_events_only: bool = True):
         super().__init__()
 
         self.log_file_path = log_file_path
+        self.show_parsed_events_only = show_parsed_events_only
+
+        self.log_file_size = os.path.getsize(self.log_file_path)
 
         self.console = Console(theme=THEME_DEFAULT)
 
@@ -449,30 +453,46 @@ class StarCitizenLogMonitorApp(App):
         self.worker = self.run_worker(self.monitor())
 
     async def process_line(self, line: str):
+        if not self.show_parsed_events_only:
+            self.logger.write_line(line)
+
         for event_parser in EVENT_PARSERS:
             if parsed_event := await event_parser(line):
                 self.logger.write_line(parsed_event)
 
     async def monitor(self):
-        try:
-            async with aiofiles.open(self.log_file_path, mode="r") as file:
-                lines = await file.readlines()
+        # External loop reloading the log file when the game restarts.
+        while True:
+            self.log_file_size = os.path.getsize(self.log_file_path)
 
-                for line in lines:
-                    await self.process_line(line)
+            try:
+                async with aiofiles.open(self.log_file_path, mode="r") as file:
+                    for line in await file.readlines():
+                        await self.process_line(line)
 
-                while True:
-                    line = await file.readline()
+                    while True:
+                        # Checking log file size, lower size implies that the game restarted,
+                        # thus, the log file will need to be reloaded.
+                        size = os.path.getsize(self.log_file_path)
 
-                    if not line:
-                        await asyncio.sleep(0.05)
+                        if size < self.log_file_size:
+                            self.logger.write_line(
+                                f"[ {self.__class__.__name__} - {__version__} - Restarting... ]"
+                            )
+                            break
 
-                        continue
+                        self.log_file_size = size
 
-                    await self.process_line(line)
+                        line = await file.readline()
 
-        except Exception as error:
-            await self.process_line(str(error))
+                        if not line:
+                            await asyncio.sleep(0.05)
+
+                            continue
+
+                        await self.process_line(line)
+            except Exception as error:
+                await self.process_line(str(error))
 
 
 @click.command()
@@ -486,12 +506,21 @@ class StarCitizenLogMonitorApp(App):
     default=True,
     help="Whether to enable player organization fetching",
 )
-def main(log_file_path: str, enable_organization_fetching: bool) -> None:
+@click.option(
+    "--show-parsed-events-only",
+    default=True,
+    help="Whether to only show the parsed events",
+)
+def main(
+    log_file_path: str,
+    enable_organization_fetching: bool,
+    show_parsed_events_only: bool,
+) -> None:
     global _ENABLE_ORGANIZATION_FETCHING
 
     _ENABLE_ORGANIZATION_FETCHING = enable_organization_fetching
 
-    app = StarCitizenLogMonitorApp(log_file_path)
+    app = StarCitizenLogMonitorApp(log_file_path, show_parsed_events_only)
     app.run()
 
 
