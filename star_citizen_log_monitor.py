@@ -49,7 +49,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -57,6 +57,7 @@ __all__ = [
     "PATTERN_TIMESTAMP_BEAUTIFIED",
     "PATTERN_NOTICE",
     "THEME_DEFAULT",
+    "PATH_EXCEPTION_LOG",
     "catch_exception",
     "fetch_page",
     "CACHE_ORGANIZATIONS",
@@ -113,6 +114,7 @@ THEME_DEFAULT = Theme(
     }
 )
 
+PATH_EXCEPTION_LOG = Path(__file__).parent / ".exceptions"
 
 def catch_exception(function: Callable) -> Callable:
     @wraps(function)
@@ -466,7 +468,7 @@ class StarCitizenLogMonitorApp(App):
             self.log_file_size = os.path.getsize(self.log_file_path)
 
             try:
-                async with aiofiles.open(self.log_file_path, mode="r") as file:
+                async with aiofiles.open(self.log_file_path, mode="r", encoding="ISO-8859-2") as file:
                     for line in await file.readlines():
                         await self.process_line(line)
 
@@ -492,6 +494,9 @@ class StarCitizenLogMonitorApp(App):
 
                         await self.process_line(line)
             except Exception as error:
+                with open(PATH_EXCEPTION_LOG, "a") as exception_log:
+                    exception_log.write(f'{datetime.now().strftime("%H:%M:%S")}: {error}\n')
+
                 await self.process_line(str(error))
 
 
