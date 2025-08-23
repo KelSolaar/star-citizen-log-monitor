@@ -49,7 +49,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -385,7 +385,7 @@ async def parse_event_requesting_transition(log_line: str) -> str:
 async def parse_event_actor_state_corpse(log_line: str) -> str:
     pattern = re.compile(
         PATTERN_NOTICE
-        + r"<\[ActorState\] Corpse> \[ACTOR STATE\]\[SSCActorStateCVars::LogCorpse\] Player '(?P<player>[\w_-]+)' <remote client>: Running corpsify for corpse. \[Team_ActorTech\]\[Actor\]"
+        + r"<\[ActorState\] Corpse> \[ACTOR STATE\]\[SSCActorStateCVars::LogCorpse\] Player '(?P<player>[\w_-]+)' <remote client>: IsCorpseEnabled: Yes, there is no local inventory\. \[Team_ActorFeatures\]\[Actor\]"
     )
 
     if search := pattern.search(log_line):
