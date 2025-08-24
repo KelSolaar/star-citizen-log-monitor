@@ -49,7 +49,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.6.2"
+__version__ = "0.7.0"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -76,6 +76,7 @@ __all__ = [
     "parse_event_requesting_transition",
     "parse_event_actor_state_corpse",
     "parse_event_actor_stall",
+    "parse_event_lost_spawn_reservation",
     "EVENT_PARSERS",
     "StarCitizenLogMonitorApp",
 ]
@@ -417,6 +418,27 @@ async def parse_event_actor_stall(log_line: str) -> str:
 
     return None
 
+@catch_exception
+async def parse_event_lost_spawn_reservation(log_line: str) -> str:
+    pattern = re.compile(
+        PATTERN_NOTICE
+        + r"<Spawn Flow> CSCPlayerPUSpawningComponent::UnregisterFromExternalSystems: "
+        + r"Player '(?P<player>[\w_-]+)' \[(?P<player_id>\d+)\] lost reservation for spawnpoint (?P<spawnpoint>\w+) "
+        + r"\[(?P<spawnpoint_id>\d+)\] at location (?P<location>\d+) "
+        + r"\[Team_ActorFeatures\]\[Gamerules\]"
+    )
+
+    if search := pattern.search(log_line):
+        data = search.groupdict()
+
+        player = beautify_entity_name(data["player"])
+        if organization := await extract_organization_name(player):
+            player = f"{player} ({organization})"
+
+        return f"{beautify_timestamp(data['timestamp'])} [Spawn Lost] Player: {player}"
+
+    return None
+
 
 EVENT_PARSERS = [
     parse_event_on_client_spawned,
@@ -428,6 +450,7 @@ EVENT_PARSERS = [
     parse_event_requesting_transition,
     parse_event_actor_state_corpse,
     parse_event_actor_stall,
+    parse_event_lost_spawn_reservation,
 ]
 
 
