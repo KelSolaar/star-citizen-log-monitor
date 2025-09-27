@@ -49,7 +49,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -440,26 +440,27 @@ async def parse_event_lost_spawn_reservation(log_line: str) -> str:
     return None
 
 
-EVENT_PARSERS = [
-    parse_event_on_client_spawned,
-    parse_event_connect_started,
-    parse_event_on_client_connected,
-    parse_event_request_quit_lobby,
-    parse_event_actor_death,
-    parse_event_vehicle_destruction,
-    parse_event_requesting_transition,
-    parse_event_actor_state_corpse,
-    parse_event_actor_stall,
-    parse_event_lost_spawn_reservation,
-]
+EVENT_PARSERS = {
+    "client-spawned": parse_event_on_client_spawned,
+    "connect-started": parse_event_connect_started,
+    "client-connected": parse_event_on_client_connected,
+    "request-quit-lobby": parse_event_request_quit_lobby,
+    "actor-death": parse_event_actor_death,
+    "vehicle-destruction": parse_event_vehicle_destruction,
+    "requesting-transition": parse_event_requesting_transition,
+    "actor-state-corpse": parse_event_actor_state_corpse,
+    "actor-stall": parse_event_actor_stall,
+    "lost-spawn-reservation": parse_event_lost_spawn_reservation,
+}
 
 
 class StarCitizenLogMonitorApp(App):
-    def __init__(self, log_file_path: str, show_parsed_events_only: bool = True):
+    def __init__(self, log_file_path: str, show_parsed_events_only: bool = True, event_filters: tuple[str, ...] = ()):
         super().__init__()
 
         self.log_file_path = log_file_path
         self.show_parsed_events_only = show_parsed_events_only
+        self.event_filters = set(event_filters) if event_filters else set(EVENT_PARSERS.keys())
 
         self.log_file_size = os.path.getsize(self.log_file_path)
 
@@ -481,10 +482,11 @@ class StarCitizenLogMonitorApp(App):
         if not self.show_parsed_events_only:
             self.logger.write_line(line)
 
-        for event_parser in EVENT_PARSERS:
-            if parsed_event := await event_parser(line):
-                self.logger.write_line(parsed_event)
-                return
+        for event_key, event_parser in EVENT_PARSERS.items():
+            if event_key in self.event_filters:
+                if parsed_event := await event_parser(line):
+                    self.logger.write_line(parsed_event)
+                    return
 
     async def monitor(self):
         # External loop reloading the log file when the game restarts.
@@ -540,16 +542,22 @@ class StarCitizenLogMonitorApp(App):
     default=True,
     help="Whether to only show the parsed events",
 )
+@click.option(
+    "--event",
+    multiple=True,
+    help="Event types to include (if not specified, all events are included)",
+)
 def main(
     log_file_path: str,
     enable_organization_fetching: bool,
     show_parsed_events_only: bool,
+    event: tuple[str, ...],
 ) -> None:
     global _ENABLE_ORGANIZATION_FETCHING
 
     _ENABLE_ORGANIZATION_FETCHING = enable_organization_fetching
 
-    app = StarCitizenLogMonitorApp(log_file_path, show_parsed_events_only)
+    app = StarCitizenLogMonitorApp(log_file_path, show_parsed_events_only, event)
     app.run()
 
 
