@@ -23,10 +23,14 @@ import asyncio
 import os
 import re
 import time
+import tkinter as tk
+import tkinter.font as tkFont
 import traceback
+from collections import deque
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
+from threading import Thread
 from typing import Callable
 
 import aiofiles
@@ -49,24 +53,28 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.7.2"
+__version__ = "0.8.0"
 
 __all__ = [
     "LOCAL_TIMEZONE",
     "PATTERN_TIMESTAMP_RAW",
     "PATTERN_TIMESTAMP_BEAUTIFIED",
     "PATTERN_NOTICE",
+    "HIGHLIGHT_PATTERNS",
+    "COLOUR_MAPPING",
     "THEME_DEFAULT",
     "PATH_EXCEPTION_LOG",
-    "catch_exception",
-    "fetch_page",
     "CACHE_ORGANIZATIONS",
     "TTL_ORGANIZATION",
+    "catch_exception",
+    "fetch_page",
     "extract_organization_name",
-    "Logger",
-    "EventHighlighter",
     "beautify_timestamp",
     "beautify_entity_name",
+    "Logger",
+    "EventHighlighter",
+    "OverlayWindow",
+    "StarCitizenLogMonitorApp",
     "parse_event_on_client_spawned",
     "parse_event_connect_started",
     "parse_event_on_client_connected",
@@ -78,7 +86,7 @@ __all__ = [
     "parse_event_actor_stall",
     "parse_event_lost_spawn_reservation",
     "EVENT_PARSERS",
-    "StarCitizenLogMonitorApp",
+    "main",
 ]
 
 LOCAL_TIMEZONE = tzlocal.get_localzone()
@@ -89,6 +97,79 @@ PATTERN_TIMESTAMP_BEAUTIFIED = (
 )
 
 PATTERN_NOTICE = "<" + PATTERN_TIMESTAMP_RAW + ">" + r" \[Notice]\ "
+
+# Shared highlighting patterns and colors
+HIGHLIGHT_PATTERNS = [
+    (r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:AM|PM))", "timestamp"),
+    (r"(?P<classifier>Zone): (?P<zone>[\w_-]+),", "classifier", "zone"),
+    (r"(?P<classifier>Requester): (?P<requester>[\w_-]+)", "classifier", "requester"),
+    (
+        r"(?P<classifier>Requester): (?P<requester>[\w_-]+ \([\w_-]+\))",
+        "classifier",
+        "requester",
+    ),
+    # Actor Death
+    (r"(?P<actordeath>\[Actor Death\])", "actordeath"),
+    (r"(?P<classifier>Victim): (?P<victim>[\w_-]+),", "classifier", "victim"),
+    (
+        r"(?P<classifier>Victim): (?P<victim>[\w_-]+ \([\w_-]+\)),",
+        "classifier",
+        "victim",
+    ),
+    (r"(?P<classifier>Killer): (?P<killer>[\w_-]+),", "classifier", "killer"),
+    (
+        r"(?P<classifier>Killer): (?P<killer>[\w_-]+ \([\w_-]+\)),",
+        "classifier",
+        "killer",
+    ),
+    (r"(?P<classifier>Weapon): (?P<weapon>[\w_-]+)", "classifier", "weapon"),
+    # Vehicle Destruction
+    (r"(?P<vehicledestruction>\[Vehicle Destruction\])", "vehicledestruction"),
+    (r"(?P<classifier>Vehicle): (?P<vehicle>[\w_-]+),", "classifier", "vehicle"),
+    (r"(?P<classifier>Driver): (?P<driver>[\w_-]+),", "classifier", "driver"),
+    (
+        r"(?P<classifier>Driver): (?P<driver>[\w_-]+ \([\w_-]+\)),",
+        "classifier",
+        "driver",
+    ),
+    (r"(?P<classifier>Caused By): (?P<causer>[\w_-]+),", "classifier", "causer"),
+    (
+        r"(?P<classifier>Caused By): (?P<causer>[\w_-]+ \([\w_-]+\)),",
+        "classifier",
+        "causer",
+    ),
+    (r"(?P<classifier>Cause): (?P<cause>[\w_-]+),", "classifier", "cause"),
+    # Actor State Corpse
+    (r"(?P<corpse>\[Corpse\])", "corpse"),
+    (r"(?P<classifier>Player): (?P<player>[\w_-]+)", "classifier", "player"),
+    (
+        r"(?P<classifier>Player): (?P<player>[\w_-]+ \([\w_-]+\))",
+        "classifier",
+        "player",
+    ),
+    # Actor Stall
+    (r"(?P<actorstall>\[Actor Stall\])", "actorstall"),
+]
+
+COLOUR_MAPPING = {
+    "timestamp": "#1E90FF",  # DodgerBlue
+    "classifier": "white",  # Bold white
+    "zone": "#32CD32",  # LimeGreen
+    "requester": "#DC143C",  # Crimson
+    "actordeath": "#DC143C",  # Crimson
+    "victim": "#FF69B4",  # HotPink
+    "killer": "#DC143C",  # Crimson
+    "weapon": "#A52A2A",  # Brown
+    "vehicledestruction": "#FF8C00",  # Orange1
+    "vehicle": "#FF69B4",  # HotPink
+    "driver": "#FF69B4",  # HotPink
+    "causer": "#DC143C",  # Crimson
+    "cause": "#A52A2A",  # Brown
+    "corpse": "#DC143C",  # Crimson
+    "player": "#FF69B4",  # HotPink
+    "actorstall": "#FF8C00",  # Orange1
+    "default": "white",  # Default white
+}
 
 THEME_DEFAULT = Theme(
     {
@@ -116,6 +197,7 @@ THEME_DEFAULT = Theme(
 )
 
 PATH_EXCEPTION_LOG = Path(__file__).parent / ".exceptions"
+
 
 def catch_exception(function: Callable) -> Callable:
     @wraps(function)
@@ -189,33 +271,7 @@ class Logger(Log):
 
 class EventHighlighter(RegexHighlighter):
     base_style = "sclh."
-    highlights = [
-        PATTERN_TIMESTAMP_BEAUTIFIED,
-        r"(?P<classifier>Zone): (?P<zone>[\w_-]+),",
-        r"(?P<classifier>Requester): (?P<requester>[\w_-]+)",
-        r"(?P<classifier>Requester): (?P<requester>[\w_-]+ \([\w_-]+\))",
-        # Actor Death
-        r"(?P<actordeath>\[Actor Death\])",
-        r"(?P<classifier>Victim): (?P<victim>[\w_-]+),",
-        r"(?P<classifier>Victim): (?P<victim>[\w_-]+ \([\w_-]+\)),",
-        r"(?P<classifier>Killer): (?P<killer>[\w_-]+),",
-        r"(?P<classifier>Killer): (?P<killer>[\w_-]+ \([\w_-]+\)),",
-        r"(?P<classifier>Weapon): (?P<weapon>[\w_-]+)",
-        # Vehicle Destruction
-        r"(?P<vehicledestruction>\[Vehicle Destruction\])",
-        r"(?P<classifier>Vehicle): (?P<vehicle>[\w_-]+),",
-        r"(?P<classifier>Driver): (?P<driver>[\w_-]+),",
-        r"(?P<classifier>Driver): (?P<driver>[\w_-]+ \([\w_-]+\)),",
-        r"(?P<classifier>Caused By): (?P<causer>[\w_-]+),",
-        r"(?P<classifier>Caused By): (?P<causer>[\w_-]+ \([\w_-]+\)),",
-        r"(?P<classifier>Cause): (?P<cause>[\w_-]+),",
-        # Actor State Corpse
-        r"(?P<corpse>\[Corpse\])",
-        r"(?P<classifier>Player): (?P<player>[\w_-]+)",
-        r"(?P<classifier>Player): (?P<player>[\w_-]+ \([\w_-]+\))",
-        # Actor Stall
-        r"(?P<actorstall>\[Actor Stall\])",
-    ]
+    highlights = [pattern[0] for pattern in HIGHLIGHT_PATTERNS]
 
 
 def beautify_timestamp(timestamp: str) -> str:
@@ -418,6 +474,7 @@ async def parse_event_actor_stall(log_line: str) -> str:
 
     return None
 
+
 @catch_exception
 async def parse_event_lost_spawn_reservation(log_line: str) -> str:
     pattern = re.compile(
@@ -454,13 +511,195 @@ EVENT_PARSERS = {
 }
 
 
+class OverlayWindow:
+    """
+    A transparent overlay window that displays log lines as floating text.
+    Uses tkinter with color key transparency to show text without background.
+    """
+
+    def __init__(self, max_lines: int = 3, display: int = 0, font_size: int = 14):
+        """
+        Initialize overlay window.
+
+        Args:
+            max_lines: Maximum number of lines to display
+            display: Display number for multi-monitor setups
+            font_size: Font size for displayed text
+        """
+        self.max_lines = max_lines
+        self.display = display
+        self.font_size = font_size
+        self.lines = deque(maxlen=max_lines)
+        self.root = None
+        self.canvas = None
+        self.text_items = []
+        self.running = False
+
+    def start(self):
+        self.running = True
+        self.root = tk.Tk()
+        self.root.title("Star Citizen Log Overlay")
+
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.lift()
+        self.root.wm_attributes("-topmost", 1)
+
+        transparent_color = "#FF00FF"
+        self.root.configure(bg=transparent_color)
+        self.root.attributes("-transparentcolor", transparent_color)
+
+        self.root.update_idletasks()
+
+        screen_width = self.root.winfo_screenwidth()
+
+        x_offset = screen_width * self.display if self.display > 0 else 0
+
+        window_width = int(screen_width * 0.66)
+        window_height = self.max_lines * (self.font_size + 5) + 20
+
+        x = int((screen_width - window_width) / 2) + x_offset
+        y = 10
+
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+        self.root.update_idletasks()
+
+        self.canvas = tk.Canvas(
+            self.root,
+            bg=transparent_color,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        self.root.bind("<Escape>", lambda _: self.stop())
+        self.root.bind("<Button-1>", self._start_move)
+        self.root.bind("<B1-Motion>", self._on_move)
+        self.root.protocol("WM_DELETE_WINDOW", self.stop)
+
+        self._keep_on_top()
+
+    def _start_move(self, event):
+        self.x = event.x
+        self.y = event.y
+
+    def _on_move(self, event):
+        deltax = event.x - self.x
+        deltay = event.y - self.y
+        x = self.root.winfo_x() + deltax
+        y = self.root.winfo_y() + deltay
+        self.root.geometry(f"+{x}+{y}")
+
+    def _keep_on_top(self):
+        if self.running and self.root:
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(1000, self._keep_on_top)
+
+    def _colorize_text(self, text: str):
+        segments = []
+        matches = []
+
+        for pattern_data in HIGHLIGHT_PATTERNS:
+            pattern = pattern_data[0]
+            for match in re.finditer(pattern, text):
+                for group_name, group_value in match.groupdict().items():
+                    if group_value is not None:
+                        color_key = group_name
+                        start_pos = match.start(group_name)
+                        end_pos = match.end(group_name)
+                        matches.append((start_pos, end_pos, group_value, color_key))
+
+        matches.sort(key=lambda x: x[0])
+
+        current_pos = 0
+        for start, end, matched_text, color_key in matches:
+            if start > current_pos:
+                segments.append((text[current_pos:start], COLOUR_MAPPING["default"]))
+
+            color = COLOUR_MAPPING.get(color_key, COLOUR_MAPPING["default"])
+            segments.append((matched_text, color))
+            current_pos = end
+
+        if current_pos < len(text):
+            segments.append((text[current_pos:], COLOUR_MAPPING["default"]))
+
+        if not segments:
+            segments = [(text, COLOUR_MAPPING["default"])]
+
+        return segments
+
+    def add_line(self, line: str):
+        if not self.root:
+            return
+
+        self.lines.append(line)
+        self._update_display()
+
+    def _update_display(self):
+        if not self.canvas:
+            return
+
+        for item in self.text_items:
+            self.canvas.delete(item)
+        self.text_items.clear()
+
+        font_tuple = ("Consolas", self.font_size, "bold")
+
+        if not hasattr(self, "_font"):
+            self._font = tkFont.Font(
+                family="Consolas", size=self.font_size, weight="bold"
+            )
+
+        y_pos = 10
+        for line in self.lines:
+            segments = self._colorize_text(line)
+
+            x_pos = 10
+            for text_segment, color in segments:
+                if text_segment:
+                    text_item = self.canvas.create_text(
+                        x_pos,
+                        y_pos,
+                        text=text_segment,
+                        font=font_tuple,
+                        fill=color,
+                        anchor="nw",
+                    )
+                    self.text_items.append(text_item)
+
+                    x_pos += self._font.measure(text_segment)
+
+            y_pos += self.font_size + 5
+
+    def stop(self):
+        self.running = False
+        if self.root:
+            self.root.quit()
+            self.root.destroy()
+
+    def mainloop(self):
+        if self.root:
+            self.root.mainloop()
+
+
 class StarCitizenLogMonitorApp(App):
-    def __init__(self, log_file_path: str, show_parsed_events_only: bool = True, event_filters: tuple[str, ...] = ()):
+    def __init__(
+        self,
+        log_file_path: str,
+        show_parsed_events_only: bool = True,
+        event_filters: tuple[str, ...] = (),
+        overlay_window=None,
+    ):
         super().__init__()
 
         self.log_file_path = log_file_path
         self.show_parsed_events_only = show_parsed_events_only
-        self.event_filters = set(event_filters) if event_filters else set(EVENT_PARSERS.keys())
+        self.event_filters = (
+            set(event_filters) if event_filters else set(EVENT_PARSERS.keys())
+        )
+        self.overlay_window = overlay_window
 
         self.log_file_size = os.path.getsize(self.log_file_path)
 
@@ -481,11 +720,15 @@ class StarCitizenLogMonitorApp(App):
     async def process_line(self, line: str):
         if not self.show_parsed_events_only:
             self.logger.write_line(line)
+            if self.overlay_window:
+                self.overlay_window.add_line(line.strip())
 
         for event_key, event_parser in EVENT_PARSERS.items():
             if event_key in self.event_filters:
                 if parsed_event := await event_parser(line):
                     self.logger.write_line(parsed_event)
+                    if self.overlay_window:
+                        self.overlay_window.add_line(parsed_event)
                     return
 
     async def monitor(self):
@@ -494,7 +737,9 @@ class StarCitizenLogMonitorApp(App):
             self.log_file_size = os.path.getsize(self.log_file_path)
 
             try:
-                async with aiofiles.open(self.log_file_path, mode="r", encoding="ISO-8859-2") as file:
+                async with aiofiles.open(
+                    self.log_file_path, mode="r", encoding="ISO-8859-2"
+                ) as file:
                     for line in await file.readlines():
                         await self.process_line(line)
 
@@ -521,7 +766,9 @@ class StarCitizenLogMonitorApp(App):
                         await self.process_line(line)
             except Exception as error:
                 with open(PATH_EXCEPTION_LOG, "a") as exception_log:
-                    exception_log.write(f'{datetime.now().strftime("%H:%M:%S")}: {error}\n')
+                    exception_log.write(
+                        f"{datetime.now().strftime('%H:%M:%S')}: {error}\n"
+                    )
 
                 await self.process_line(str(error))
 
@@ -547,18 +794,62 @@ class StarCitizenLogMonitorApp(App):
     multiple=True,
     help="Event types to include (if not specified, all events are included)",
 )
+@click.option(
+    "--overlay",
+    is_flag=True,
+    help="Enable overlay mode with transparent window",
+)
+@click.option(
+    "--overlay-lines",
+    default=3,
+    help="Number of lines to show in overlay (default: 3)",
+)
+@click.option(
+    "--overlay-display",
+    default=0,
+    help="Display number to show overlay on (default: 0)",
+)
+@click.option(
+    "--overlay-font-size",
+    default=12,
+    help="Font size for overlay text (default: 12)",
+)
 def main(
     log_file_path: str,
     enable_organization_fetching: bool,
     show_parsed_events_only: bool,
     event: tuple[str, ...],
+    overlay: bool,
+    overlay_lines: int,
+    overlay_display: int,
+    overlay_font_size: int,
 ) -> None:
     global _ENABLE_ORGANIZATION_FETCHING
 
     _ENABLE_ORGANIZATION_FETCHING = enable_organization_fetching
 
-    app = StarCitizenLogMonitorApp(log_file_path, show_parsed_events_only, event)
-    app.run()
+    if overlay:
+        overlay_window = OverlayWindow(
+            overlay_lines, overlay_display, overlay_font_size
+        )
+        overlay_window.start()
+
+        overlay_window.add_line("Star Citizen Log Overlay Active")
+        overlay_window.add_line("Waiting for log events...")
+
+        app = StarCitizenLogMonitorApp(
+            log_file_path, show_parsed_events_only, event, overlay_window
+        )
+        app_thread = Thread(target=app.run, daemon=True)
+        app_thread.start()
+
+        try:
+            overlay_window.mainloop()
+        finally:
+            overlay_window.stop()
+    else:
+        app = StarCitizenLogMonitorApp(log_file_path, show_parsed_events_only, event)
+        app.run()
 
 
 if __name__ == "__main__":

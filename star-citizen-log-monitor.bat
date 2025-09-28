@@ -8,7 +8,7 @@ if not exist "%UV_PATH%" (
 )
 
 REM Run it!
-%UV_PATH% run ./star_citizen_log_monitor.py --log-file-path=%SC_DIR%\Game.log
+%UV_PATH% run ./star_citizen_log_monitor.py --log-file-path=%SC_DIR%\Game.log --overlay
 
 REM Alternative launch from Github:
 REM %UV_PATH% run https://raw.githubusercontent.com/KelSolaar/star-citizen-log-monitor/refs/heads/master/star_citizen_log_monitor.py --log-file-path=%SC_DIR%\Game.log
