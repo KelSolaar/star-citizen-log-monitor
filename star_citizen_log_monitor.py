@@ -53,7 +53,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -690,6 +690,7 @@ class StarCitizenLogMonitorApp(App):
         log_file_path: str,
         show_parsed_events_only: bool = True,
         event_filters: tuple[str, ...] = (),
+        overlay_event_filters: tuple[str, ...] = (),
         overlay_window=None,
     ):
         super().__init__()
@@ -698,6 +699,9 @@ class StarCitizenLogMonitorApp(App):
         self.show_parsed_events_only = show_parsed_events_only
         self.event_filters = (
             set(event_filters) if event_filters else set(EVENT_PARSERS.keys())
+        )
+        self.overlay_event_filters = (
+            set(overlay_event_filters) if overlay_event_filters else self.event_filters
         )
         self.overlay_window = overlay_window
 
@@ -724,11 +728,17 @@ class StarCitizenLogMonitorApp(App):
                 self.overlay_window.add_line(line.strip())
 
         for event_key, event_parser in EVENT_PARSERS.items():
-            if event_key in self.event_filters:
-                if parsed_event := await event_parser(line):
+            if parsed_event := await event_parser(line):
+                # Add to console if event matches console filters
+                if event_key in self.event_filters:
                     self.logger.write_line(parsed_event)
-                    if self.overlay_window:
-                        self.overlay_window.add_line(parsed_event)
+
+                # Add to overlay if event matches overlay filters
+                if self.overlay_window and event_key in self.overlay_event_filters:
+                    self.overlay_window.add_line(parsed_event)
+
+                # Return after first successful parse to avoid double processing
+                if event_key in self.event_filters or (self.overlay_window and event_key in self.overlay_event_filters):
                     return
 
     async def monitor(self):
@@ -795,6 +805,11 @@ class StarCitizenLogMonitorApp(App):
     help="Event types to include (if not specified, all events are included)",
 )
 @click.option(
+    "--overlay-event",
+    multiple=True,
+    help="Event types to include in overlay (if not specified, uses --event filter)",
+)
+@click.option(
     "--overlay",
     is_flag=True,
     help="Enable overlay mode with transparent window",
@@ -819,6 +834,7 @@ def main(
     enable_organization_fetching: bool,
     show_parsed_events_only: bool,
     event: tuple[str, ...],
+    overlay_event: tuple[str, ...],
     overlay: bool,
     overlay_lines: int,
     overlay_display: int,
@@ -838,7 +854,7 @@ def main(
         overlay_window.add_line("Waiting for log events...")
 
         app = StarCitizenLogMonitorApp(
-            log_file_path, show_parsed_events_only, event, overlay_window
+            log_file_path, show_parsed_events_only, event, overlay_event, overlay_window
         )
         app_thread = Thread(target=app.run, daemon=True)
         app_thread.start()
@@ -848,7 +864,7 @@ def main(
         finally:
             overlay_window.stop()
     else:
-        app = StarCitizenLogMonitorApp(log_file_path, show_parsed_events_only, event)
+        app = StarCitizenLogMonitorApp(log_file_path, show_parsed_events_only, event, overlay_event)
         app.run()
 
 
