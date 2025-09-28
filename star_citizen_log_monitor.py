@@ -53,7 +53,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -141,12 +141,7 @@ HIGHLIGHT_PATTERNS = [
     (r"(?P<classifier>Cause): (?P<cause>[\w_-]+),", "classifier", "cause"),
     # Actor State Corpse
     (r"(?P<corpse>\[Corpse\])", "corpse"),
-    (r"(?P<classifier>Player): (?P<player>[\w_-]+)", "classifier", "player"),
-    (
-        r"(?P<classifier>Player): (?P<player>[\w_-]+ \([\w_-]+\))",
-        "classifier",
-        "player",
-    ),
+    (r"(?P<classifier>Player): (?P<player>[\w_-]+(?:\s+\([\w_-]+\))?)", "classifier", "player"),
     # Actor Stall
     (r"(?P<actorstall>\[Actor Stall\])", "actorstall"),
 ]
