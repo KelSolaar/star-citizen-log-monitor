@@ -53,7 +53,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -512,7 +512,7 @@ class OverlayWindow:
     Uses tkinter with color key transparency to show text without background.
     """
 
-    def __init__(self, max_lines: int = 3, display: int = 0, font_size: int = 14):
+    def __init__(self, max_lines: int = 3, display: int = 0, font_size: int = 12):
         """
         Initialize overlay window.
 
