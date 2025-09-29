@@ -44,7 +44,7 @@ from rich.console import Console
 from rich.highlighter import RegexHighlighter
 from rich.theme import Theme
 from textual.app import App, ComposeResult
-from textual.widgets import Log
+from textual.widgets import RichLog
 from textual.worker import Worker
 
 __author__ = "Thomas Mansencal"
@@ -53,7 +53,7 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
-__version__ = "0.9.2"
+__version__ = "0.10.0"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -71,6 +71,10 @@ __all__ = [
     "extract_organization_name",
     "beautify_timestamp",
     "beautify_entity_name",
+    "make_hyperlink",
+    "make_player_link",
+    "make_org_link",
+    "strip_markup",
     "Logger",
     "EventHighlighter",
     "OverlayWindow",
@@ -141,7 +145,11 @@ HIGHLIGHT_PATTERNS = [
     (r"(?P<classifier>Cause): (?P<cause>[\w_-]+),", "classifier", "cause"),
     # Actor State Corpse
     (r"(?P<corpse>\[Corpse\])", "corpse"),
-    (r"(?P<classifier>Player): (?P<player>[\w_-]+(?:\s+\([\w_-]+\))?)", "classifier", "player"),
+    (
+        r"(?P<classifier>Player): (?P<player>[\w_-]+(?:\s+\([\w_-]+\))?)",
+        "classifier",
+        "player",
+    ),
     # Actor Stall
     (r"(?P<actorstall>\[Actor Stall\])", "actorstall"),
 ]
@@ -259,7 +267,7 @@ async def extract_organization_name(player: str) -> str | None:
         return organization
 
 
-class Logger(Log):
+class Logger(RichLog):
     def flush(self) -> None:
         pass
 
@@ -283,6 +291,26 @@ def beautify_entity_name(name: str) -> str:
         return match.group(1)
 
     return name
+
+
+def make_hyperlink(url: str, text: str) -> str:
+    return f"[link={url}]{text}[/link]"
+
+
+def make_player_link(player: str) -> str:
+    url = f"https://robertsspaceindustries.com/citizens/{player}"
+
+    return make_hyperlink(url, player)
+
+
+def make_org_link(org: str) -> str:
+    url = f"https://robertsspaceindustries.com/orgs/{org}"
+
+    return make_hyperlink(url, org)
+
+
+def strip_markup(text: str) -> str:
+    return re.sub(r"\[link=[^\]]*\]([^\[]*)\[/link\]", r"\1", text)
 
 
 @catch_exception
@@ -347,10 +375,12 @@ async def parse_event_request_quit_lobby(log_line: str) -> str:
         data = search.groupdict()
 
         requester = beautify_entity_name(data["requester"])
+        requester_link = make_player_link(requester)
         if organization := await extract_organization_name(requester):
-            requester = f"{requester} ({organization})"
+            org_link = make_org_link(organization)
+            requester_link = f"{requester_link} ({org_link})"
 
-        return f"{beautify_timestamp(data['timestamp'])} [Request Quit Lobby] Requester: {requester}"
+        return f"{beautify_timestamp(data['timestamp'])} [Request Quit Lobby] Requester: {requester_link}"
 
     return None
 
@@ -366,17 +396,21 @@ async def parse_event_actor_death(log_line: str) -> str:
         data = search.groupdict()
 
         victim = beautify_entity_name(data["victim"])
+        victim_link = make_player_link(victim)
         if organization := await extract_organization_name(victim):
-            victim = f"{victim} ({organization})"
+            org_link = make_org_link(organization)
+            victim_link = f"{victim_link} ({org_link})"
 
         killer = beautify_entity_name(data["killer"])
+        killer_link = make_player_link(killer)
         if organization := await extract_organization_name(killer):
-            killer = f"{killer} ({organization})"
+            org_link = make_org_link(organization)
+            killer_link = f"{killer_link} ({org_link})"
 
         return (
             f"{beautify_timestamp(data['timestamp'])} [Actor Death] "
-            f"Victim: {victim}, "
-            f"Killer: {killer}, "
+            f"Victim: {victim_link}, "
+            f"Killer: {killer_link}, "
             f"Zone: {beautify_entity_name(data['zone'])}, "
             f"Weapon: {beautify_entity_name(data['weapon'])}"
         )
@@ -395,18 +429,22 @@ async def parse_event_vehicle_destruction(log_line: str) -> str:
         data = search.groupdict()
 
         driver = beautify_entity_name(data["driver"])
+        driver_link = make_player_link(driver)
         if organization := await extract_organization_name(driver):
-            driver = f"{driver} ({organization})"
+            org_link = make_org_link(organization)
+            driver_link = f"{driver_link} ({org_link})"
 
         causer = beautify_entity_name(data["causer"])
+        causer_link = make_player_link(causer)
         if organization := await extract_organization_name(causer):
-            causer = f"{causer} ({organization})"
+            org_link = make_org_link(organization)
+            causer_link = f"{causer_link} ({org_link})"
 
         return (
             f"{beautify_timestamp(data['timestamp'])} [Vehicle Destruction] "
             f"Vehicle: {beautify_entity_name(data['vehicle_name'])}, "
-            f"Driver: {driver}, "
-            f"Caused By: {causer}, "
+            f"Driver: {driver_link}, "
+            f"Caused By: {causer_link}, "
             f"Cause: {data['cause']}, "
             f"Zone: {beautify_entity_name(data['zone'])}"
         )
@@ -444,10 +482,12 @@ async def parse_event_actor_state_corpse(log_line: str) -> str:
         data = search.groupdict()
 
         player = beautify_entity_name(data["player"])
+        player_link = make_player_link(player)
         if organization := await extract_organization_name(player):
-            player = f"{player} ({organization})"
+            org_link = make_org_link(organization)
+            player_link = f"{player_link} ({org_link})"
 
-        return f"{beautify_timestamp(data['timestamp'])} [Corpse] Player: {player}"
+        return f"{beautify_timestamp(data['timestamp'])} [Corpse] Player: {player_link}"
 
     return None
 
@@ -462,10 +502,12 @@ async def parse_event_actor_stall(log_line: str) -> str:
         data = search.groupdict()
 
         player = beautify_entity_name(data["player"])
+        player_link = make_player_link(player)
         if organization := await extract_organization_name(player):
-            player = f"{player} ({organization})"
+            org_link = make_org_link(organization)
+            player_link = f"{player_link} ({org_link})"
 
-        return f"{beautify_timestamp(data['timestamp'])} [Actor Stall] Player: {player}, Length: {round(float(data['length']), 1)}"
+        return f"{beautify_timestamp(data['timestamp'])} [Actor Stall] Player: {player_link}, Length: {round(float(data['length']), 1)}"
 
     return None
 
@@ -484,10 +526,12 @@ async def parse_event_lost_spawn_reservation(log_line: str) -> str:
         data = search.groupdict()
 
         player = beautify_entity_name(data["player"])
+        player_link = make_player_link(player)
         if organization := await extract_organization_name(player):
-            player = f"{player} ({organization})"
+            org_link = make_org_link(organization)
+            player_link = f"{player_link} ({org_link})"
 
-        return f"{beautify_timestamp(data['timestamp'])} [Spawn Lost] Player: {player}"
+        return f"{beautify_timestamp(data['timestamp'])} [Spawn Lost] Player: {player_link}"
 
     return None
 
@@ -512,7 +556,7 @@ class OverlayWindow:
     Uses tkinter with color key transparency to show text without background.
     """
 
-    def __init__(self, max_lines: int = 3, display: int = 0, font_size: int = 12):
+    def __init__(self, max_lines: int = 3, display: int = 0, font_size: int = 10):
         """
         Initialize overlay window.
 
@@ -640,12 +684,8 @@ class OverlayWindow:
             self.canvas.delete(item)
         self.text_items.clear()
 
-        font_tuple = ("Consolas", self.font_size, "bold")
-
-        if not hasattr(self, "_font"):
-            self._font = tkFont.Font(
-                family="Consolas", size=self.font_size, weight="bold"
-            )
+        self._font = tkFont.Font(family="Terminal", size=self.font_size, weight="bold")
+        font_tuple = ("Terminal", self.font_size, "bold")
 
         y_pos = 10
         for line in self.lines:
@@ -704,7 +744,7 @@ class StarCitizenLogMonitorApp(App):
 
         self.console = Console(theme=THEME_DEFAULT)
 
-        self.logger = Logger(highlight=True)
+        self.logger = Logger(highlight=True, markup=True)
         self.logger.highlighter = EventHighlighter()
 
         self.worker: Worker | None = None
@@ -713,12 +753,12 @@ class StarCitizenLogMonitorApp(App):
         yield self.logger
 
     def on_mount(self):
-        self.logger.write_line(f"[ {self.__class__.__name__} - {__version__} ]")
+        self.logger.write(f"[ {self.__class__.__name__} - {__version__} ]")
         self.worker = self.run_worker(self.monitor())
 
     async def process_line(self, line: str):
         if not self.show_parsed_events_only:
-            self.logger.write_line(line)
+            self.logger.write(line)
             if self.overlay_window:
                 self.overlay_window.add_line(line.strip())
 
@@ -726,14 +766,16 @@ class StarCitizenLogMonitorApp(App):
             if parsed_event := await event_parser(line):
                 # Add to console if event matches console filters
                 if event_key in self.event_filters:
-                    self.logger.write_line(parsed_event)
+                    self.logger.write(parsed_event)
 
                 # Add to overlay if event matches overlay filters
                 if self.overlay_window and event_key in self.overlay_event_filters:
-                    self.overlay_window.add_line(parsed_event)
+                    self.overlay_window.add_line(strip_markup(parsed_event))
 
                 # Return after first successful parse to avoid double processing
-                if event_key in self.event_filters or (self.overlay_window and event_key in self.overlay_event_filters):
+                if event_key in self.event_filters or (
+                    self.overlay_window and event_key in self.overlay_event_filters
+                ):
                     return
 
     async def monitor(self):
@@ -754,7 +796,7 @@ class StarCitizenLogMonitorApp(App):
                         size = os.path.getsize(self.log_file_path)
 
                         if size < self.log_file_size:
-                            self.logger.write_line(
+                            self.logger.write(
                                 f"[ {self.__class__.__name__} - {__version__} - Restarting... ]"
                             )
                             break
@@ -821,8 +863,8 @@ class StarCitizenLogMonitorApp(App):
 )
 @click.option(
     "--overlay-font-size",
-    default=12,
-    help="Font size for overlay text (default: 12)",
+    default=10,
+    help="Font size for overlay text (default: 10)",
 )
 def main(
     log_file_path: str,
@@ -859,7 +901,9 @@ def main(
         finally:
             overlay_window.stop()
     else:
-        app = StarCitizenLogMonitorApp(log_file_path, show_parsed_events_only, event, overlay_event)
+        app = StarCitizenLogMonitorApp(
+            log_file_path, show_parsed_events_only, event, overlay_event
+        )
         app.run()
 
 
