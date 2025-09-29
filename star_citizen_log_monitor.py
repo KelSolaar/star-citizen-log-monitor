@@ -1,13 +1,14 @@
 # /// script
 # dependencies = [
-#   "aiofiles>=24,<25",
-#   "aiohttp>=3,<4",
-#   "beautifulsoup4>=4,<5",
-#   "click>=8,<9",
-#   "pickledb>=1,<2",
-#   "pytz>=2025",
-#   "textual>=2,<3",
-#   "tzlocal>=5,<6",
+#   "aiofiles==24.1.0",
+#   "aiohttp==3.12.15",
+#   "beautifulsoup4==4.14.0",
+#   "click==8.3.0",
+#   "pickledb==1.0",
+#   "PySide6==6.9.2",
+#   "pytz==2025.2",
+#   "textual==2.1.2",
+#   "tzlocal==5.2",
 # ]
 # ///
 
@@ -19,19 +20,21 @@ An opinionated log monitor for `Star Citizen <https://robertsspaceindustries.com
 with an emphasis put on extracting combat related data.
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 import re
 import time
-import tkinter as tk
-import tkinter.font as tkFont
 import traceback
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from threading import Thread
-from typing import Callable
+from typing import Callable, List
+from abc import ABC, abstractmethod
 
 import aiofiles
 import aiohttp
@@ -40,9 +43,8 @@ import pytz
 import tzlocal
 from bs4 import BeautifulSoup
 from pickledb import PickleDB
-from rich.console import Console
-from rich.highlighter import RegexHighlighter
-from rich.theme import Theme
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel
+from PySide6.QtCore import Qt, QTimer
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog
 from textual.worker import Worker
@@ -53,6 +55,8 @@ __license__ = "BSD-3-Clause - https://opensource.org/licenses/BSD-3-Clause"
 __maintainer__ = "Thomas Mansencal"
 __status__ = "Production"
 
+__application__ = "Star Citizen Log Monitor"
+
 __version__ = "0.10.0"
 
 __all__ = [
@@ -62,21 +66,17 @@ __all__ = [
     "PATTERN_NOTICE",
     "HIGHLIGHT_PATTERNS",
     "COLOUR_MAPPING",
-    "THEME_DEFAULT",
     "PATH_EXCEPTION_LOG",
     "CACHE_ORGANIZATIONS",
     "TTL_ORGANIZATION",
+    "Entity",
+    "ParsedEvent",
     "catch_exception",
     "fetch_page",
     "extract_organization_name",
     "beautify_timestamp",
     "beautify_entity_name",
-    "make_hyperlink",
-    "make_player_link",
-    "make_org_link",
-    "strip_markup",
     "Logger",
-    "EventHighlighter",
     "OverlayWindow",
     "StarCitizenLogMonitorApp",
     "parse_event_on_client_spawned",
@@ -105,24 +105,37 @@ PATTERN_NOTICE = "<" + PATTERN_TIMESTAMP_RAW + ">" + r" \[Notice]\ "
 # Shared highlighting patterns and colors
 HIGHLIGHT_PATTERNS = [
     (r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:AM|PM))", "timestamp"),
-    (r"(?P<classifier>Zone): (?P<zone>[\w_-]+),", "classifier", "zone"),
-    (r"(?P<classifier>Requester): (?P<requester>[\w_-]+)", "classifier", "requester"),
+    # Basic Events
+    (r"(?P<clientspawned>\[Client Spawned\])", "clientspawned"),
+    (r"(?P<connectstarted>\[Connect Started\])", "connectstarted"),
+    (r"(?P<clientconnected>\[Client Connected\])", "clientconnected"),
+    # Request Quit Lobby
+    (r"(?P<requestquitlobby>\[Request Quit Lobby\])", "requestquitlobby"),
+    # Requesting Transition
+    (r"(?P<requestingtransition>\[Requesting Transition\])", "requestingtransition"),
     (
-        r"(?P<classifier>Requester): (?P<requester>[\w_-]+ \([\w_-]+\))",
+        r"(?P<classifier>From): (?P<fromsystem>[\w_-]+) \((?P<fromzone>[\w_-]+)\),",
         "classifier",
-        "requester",
+        "fromsystem",
+        "fromzone",
     ),
+    (
+        r"(?P<classifier>To): (?P<tosystem>[\w_-]+) \((?P<tozone>[\w_-]+)\)",
+        "classifier",
+        "tosystem",
+        "tozone",
+    ),
+    # Common fields
+    (r"(?P<classifier>Zone): (?P<zone>[\w_-]+),", "classifier", "zone"),
     # Actor Death
     (r"(?P<actordeath>\[Actor Death\])", "actordeath"),
-    (r"(?P<classifier>Victim): (?P<victim>[\w_-]+),", "classifier", "victim"),
     (
-        r"(?P<classifier>Victim): (?P<victim>[\w_-]+ \([\w_-]+\)),",
+        r"(?P<classifier>Victim): (?P<victim>[\w_-]+(?:\s+\([\w_-]+\))?),",
         "classifier",
         "victim",
     ),
-    (r"(?P<classifier>Killer): (?P<killer>[\w_-]+),", "classifier", "killer"),
     (
-        r"(?P<classifier>Killer): (?P<killer>[\w_-]+ \([\w_-]+\)),",
+        r"(?P<classifier>Killer): (?P<killer>[\w_-]+(?:\s+\([\w_-]+\))?)(?:,|$)",
         "classifier",
         "killer",
     ),
@@ -130,35 +143,45 @@ HIGHLIGHT_PATTERNS = [
     # Vehicle Destruction
     (r"(?P<vehicledestruction>\[Vehicle Destruction\])", "vehicledestruction"),
     (r"(?P<classifier>Vehicle): (?P<vehicle>[\w_-]+),", "classifier", "vehicle"),
-    (r"(?P<classifier>Driver): (?P<driver>[\w_-]+),", "classifier", "driver"),
     (
-        r"(?P<classifier>Driver): (?P<driver>[\w_-]+ \([\w_-]+\)),",
+        r"(?P<classifier>Driver): (?P<driver>[\w_-]+(?:\s+\([\w_-]+\))?),",
         "classifier",
         "driver",
     ),
-    (r"(?P<classifier>Caused By): (?P<causer>[\w_-]+),", "classifier", "causer"),
     (
-        r"(?P<classifier>Caused By): (?P<causer>[\w_-]+ \([\w_-]+\)),",
+        r"(?P<classifier>Caused By): (?P<causer>[\w_-]+(?:\s+\([\w_-]+\))?),",
         "classifier",
         "causer",
     ),
     (r"(?P<classifier>Cause): (?P<cause>[\w_-]+),", "classifier", "cause"),
     # Actor State Corpse
     (r"(?P<corpse>\[Corpse\])", "corpse"),
+    # Actor Stall
+    (r"(?P<actorstall>\[Actor Stall\])", "actorstall"),
+    # Common player pattern (with optional comma)
     (
-        r"(?P<classifier>Player): (?P<player>[\w_-]+(?:\s+\([\w_-]+\))?)",
+        r"(?P<classifier>Player): (?P<player>[\w_-]+(?:\s+\([\w_-]+\))?)(?:,|$)?",
         "classifier",
         "player",
     ),
-    # Actor Stall
-    (r"(?P<actorstall>\[Actor Stall\])", "actorstall"),
+    # Spawn Lost
+    (r"(?P<spawnlost>\[Spawn Lost\])", "spawnlost"),
 ]
 
 COLOUR_MAPPING = {
     "timestamp": "#1E90FF",  # DodgerBlue
     "classifier": "white",  # Bold white
-    "zone": "#32CD32",  # LimeGreen
+    "clientspawned": "#228B22",  # ForestGreen
+    "connectstarted": "#228B22",  # ForestGreen
+    "clientconnected": "#228B22",  # ForestGreen
+    "requestquitlobby": "#FF8C00",  # Orange1
     "requester": "#DC143C",  # Crimson
+    "requestingtransition": "#9370DB",  # MediumPurple
+    "fromsystem": "#228B22",  # ForestGreen
+    "fromzone": "#228B22",  # ForestGreen
+    "tosystem": "#228B22",  # ForestGreen
+    "tozone": "#228B22",  # ForestGreen
+    "zone": "#228B22",  # ForestGreen
     "actordeath": "#DC143C",  # Crimson
     "victim": "#FF69B4",  # HotPink
     "killer": "#DC143C",  # Crimson
@@ -171,38 +194,239 @@ COLOUR_MAPPING = {
     "corpse": "#DC143C",  # Crimson
     "player": "#FF69B4",  # HotPink
     "actorstall": "#FF8C00",  # Orange1
-    "default": "white",  # Default white
+    "spawnlost": "#EEEEEE",  # White
+    "number": "#1E90FF",  # DodgerBlue
+    "spawnpoint": "#9370DB",  # MediumPurple
+    "error": "#DC143C",  # Crimson for exceptions/errors
+    "default": "#EEEEEE",  # Default white
 }
-
-THEME_DEFAULT = Theme(
-    {
-        "sclh.timestamp": "italic #1E90FF",
-        "sclh.classifier": "bold",
-        "sclh.zone": "italic #32CD32",
-        "sclh.requester": "italic #DC143C",
-        # Actor Death
-        "sclh.actordeath": "bold #DC143C",
-        "sclh.victim": "italic #FF69B4",
-        "sclh.killer": "italic #DC143C",
-        "sclh.weapon": "italic #A52A2A",
-        # Vehicle Destruction
-        "sclh.vehicledestruction": "bold orange1",
-        "sclh.vehicle": "italic #FF69B4",
-        "sclh.driver": "italic #FF69B4",
-        "sclh.causer": "italic #DC143C",
-        "sclh.cause": "italic #A52A2A",
-        # Actor State Corpse
-        "sclh.corpse": "bold #DC143C",
-        "sclh.player": "italic #FF69B4",
-        # Actor Stall
-        "sclh.actorstall": "bold orange1",
-    }
-)
 
 PATH_EXCEPTION_LOG = Path(__file__).parent / ".exceptions"
 
 
+class Entity(ABC):
+    """Abstract base class for all entities in parsed events."""
+
+    def __init__(self, text: str, color: str = COLOUR_MAPPING["default"]):
+        self.text = text
+        self.color = color
+
+    @abstractmethod
+    def render_textual(self) -> str:
+        """Render this entity for Textual (Rich markup)."""
+        pass
+
+    @abstractmethod
+    def render_overlay(self) -> str:
+        """Render this entity for Qt overlay (HTML)."""
+        pass
+
+
+class TextEntity(Entity):
+    """Plain text entity with color."""
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class PlayerEntity(Entity):
+    """Player entity that can have organization and links."""
+
+    def __init__(
+        self, text: str, color: str = COLOUR_MAPPING["player"], org_name: str = None
+    ):
+        super().__init__(text, color)
+        self.org_name = org_name
+
+    @classmethod
+    async def __async_init__(cls, raw_name: str, color: str = COLOUR_MAPPING["player"]):
+        """Create PlayerEntity with beautified name and organization."""
+
+        beautified_name = beautify_entity_name(raw_name)
+        org_name = await extract_organization_name(beautified_name)
+        return cls(beautified_name, color, org_name)
+
+    def render_textual(self) -> str:
+        if should_create_player_link(self.text):
+            result = f"[link=https://robertsspaceindustries.com/citizens/{self.text}][{self.color}]{self.text}[/{self.color}][/link]"
+        else:
+            result = f"[{self.color}]{self.text}[/{self.color}]"
+
+        if self.org_name:
+            result += f"[{self.color}] ([link=https://robertsspaceindustries.com/orgs/{self.org_name}]{self.org_name}[/link])[/{self.color}]"
+
+        return result
+
+    def render_overlay(self) -> str:
+        if should_create_player_link(self.text):
+            result = f'<a href="https://robertsspaceindustries.com/citizens/{self.text}" style="color: {self.color}; text-decoration: underline;">{self.text}</a>'
+        else:
+            result = f'<span style="color: {self.color};">{self.text}</span>'
+
+        if self.org_name:
+            org_link = f'<a href="https://robertsspaceindustries.com/orgs/{self.org_name}" style="color: {self.color}; text-decoration: underline;">{self.org_name}</a>'
+            result = f'<span style="color: {self.color};">{result} ({org_link})</span>'
+
+        return result
+
+
+class ZoneEntity(Entity):
+    """Zone/location entity."""
+
+    def __init__(self, raw_name: str, color: str = COLOUR_MAPPING["zone"]):
+        super().__init__(beautify_entity_name(raw_name), color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class WeaponEntity(Entity):
+    """Weapon entity."""
+
+    def __init__(self, raw_name: str, color: str = COLOUR_MAPPING["weapon"]):
+        super().__init__(beautify_entity_name(raw_name), color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class VehicleEntity(Entity):
+    """Vehicle entity."""
+
+    def __init__(self, text: str, color: str = COLOUR_MAPPING["vehicle"]):
+        super().__init__(text, color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class CauseEntity(Entity):
+    """Cause/reason entity."""
+
+    def __init__(self, raw_name: str, color: str = COLOUR_MAPPING["cause"]):
+        super().__init__(beautify_entity_name(raw_name), color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class SystemEntity(Entity):
+    """System entity."""
+
+    def __init__(self, raw_name: str, color: str = COLOUR_MAPPING["zone"]):
+        super().__init__(beautify_entity_name(raw_name), color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class NumberEntity(Entity):
+    """Numeric value entity."""
+
+    def __init__(self, value: str, color: str = COLOUR_MAPPING["number"]):
+        super().__init__(value, color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class SpawnpointEntity(Entity):
+    """Spawnpoint entity."""
+
+    def __init__(self, raw_name: str, color: str = COLOUR_MAPPING["spawnpoint"]):
+        super().__init__(beautify_entity_name(raw_name), color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class TimestampEntity(Entity):
+    """Timestamp entity."""
+
+    def __init__(self, raw_timestamp: str, color: str = COLOUR_MAPPING["timestamp"]):
+        super().__init__(beautify_timestamp(raw_timestamp), color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}]{self.text}[/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">{self.text}</span>'
+
+
+class CategoryEntity(Entity):
+    """Event category entity."""
+
+    def __init__(self, text: str, color: str = None):
+        # Map category text to appropriate colors
+        if color is None:
+            category_map = {
+                "Client Spawned": COLOUR_MAPPING["clientspawned"],
+                "Connect Started": COLOUR_MAPPING["connectstarted"],
+                "Client Connected": COLOUR_MAPPING["clientconnected"],
+                "Request Quit Lobby": COLOUR_MAPPING["requestquitlobby"],
+                "Requesting Transition": COLOUR_MAPPING["requestingtransition"],
+                "Actor Death": COLOUR_MAPPING["actordeath"],
+                "Vehicle Destruction": COLOUR_MAPPING["vehicledestruction"],
+                "Corpse": COLOUR_MAPPING["corpse"],
+                "Actor Stall": COLOUR_MAPPING["actorstall"],
+                "Spawn Lost": COLOUR_MAPPING["spawnlost"],
+            }
+            color = category_map.get(text, COLOUR_MAPPING["default"])
+        super().__init__(text, color)
+
+    def render_textual(self) -> str:
+        return f"[{self.color}][{self.text}][/{self.color}]"
+
+    def render_overlay(self) -> str:
+        return f'<span style="color: {self.color};">[{self.text}]</span>'
+
+
+@dataclass
+class ParsedEvent:
+    """Represents a parsed event with entities."""
+
+    entities: List[
+        Entity
+    ]  # All components: timestamp, category, players, zones, weapons, etc.
+
+    def render_textual(self) -> str:
+        """Render this ParsedEvent for Textual console."""
+
+        return "".join(entity.render_textual() for entity in self.entities)
+
+    def render_overlay(self) -> str:
+        """Render this ParsedEvent for Qt overlay."""
+
+        return "".join(entity.render_overlay() for entity in self.entities)
+
+
 def catch_exception(function: Callable) -> Callable:
+    """Catch exceptions and return as ParsedEvent objects."""
+
     @wraps(function)
     async def wrapper(*args, **kwargs):
         try:
@@ -210,14 +434,27 @@ def catch_exception(function: Callable) -> Callable:
         except Exception:
             tb = traceback.format_exc()
 
-            return f"Exception in {function.__name__}: {tb}"
+            # Write exception to file for debugging
+            with open(PATH_EXCEPTION_LOG, "a") as exception_log:
+                exception_log.write(
+                    f"{datetime.now().strftime('%H:%M:%S')}: {function.__name__}: ARGS={args}: {tb}\n"
+                )
+
+            # Return a ParsedEvent for the exception instead of a string
+            return ParsedEvent(
+                entities=[
+                    TextEntity(f"Exception in {function.__name__}: {tb}", COLOUR_MAPPING["error"])
+                ]
+            )
 
     return wrapper
 
 
-async def fetch_page(session: aiohttp.ClientSession, url: str) -> str:
+async def fetch_page(session: aiohttp.ClientSession, url: str) -> tuple[int, str]:
+    """Fetch a web page and return status code and content."""
+
     async with session.get(url) as response:
-        return await response.text()
+        return response.status, await response.text()
 
 
 CACHE_ORGANIZATIONS = PickleDB(Path(__file__).parent / ".organizations")
@@ -228,6 +465,8 @@ _ENABLE_ORGANIZATION_FETCHING = True
 
 
 async def extract_organization_name(player: str) -> str | None:
+    """Extract organization name for a player from RSI website."""
+
     if not _ENABLE_ORGANIZATION_FETCHING:
         return None
 
@@ -239,13 +478,32 @@ async def extract_organization_name(player: str) -> str | None:
 
     url = f"https://robertsspaceindustries.com/en/citizens/{player}"
     async with aiohttp.ClientSession() as session:
-        html_content = await fetch_page(session, url)
+        status, html_content = await fetch_page(session, url)
+
+        # If page not found (404), mark as not a player
+        if status == 404:
+            CACHE_ORGANIZATIONS.set(
+                player,
+                {
+                    "organization": None,
+                    "is_player": False,
+                    "expiration": time.time() + TTL_ORGANIZATION,
+                },
+            )
+            CACHE_ORGANIZATIONS.save()
+            return None
+
         soup = BeautifulSoup(html_content, "html.parser")
         sid = soup.find(text="Spectrum Identification (SID)")
         if sid is None:
+            # Player exists (200 status) but has no organization section
             CACHE_ORGANIZATIONS.set(
                 player,
-                {"organization": None, "expiration": time.time() + TTL_ORGANIZATION},
+                {
+                    "organization": None,
+                    "is_player": True,
+                    "expiration": time.time() + TTL_ORGANIZATION,
+                },
             )
 
             CACHE_ORGANIZATIONS.save()
@@ -258,6 +516,7 @@ async def extract_organization_name(player: str) -> str | None:
             player,
             {
                 "organization": organization,
+                "is_player": True,
                 "expiration": time.time() + TTL_ORGANIZATION,
             },
         )
@@ -268,16 +527,15 @@ async def extract_organization_name(player: str) -> str | None:
 
 
 class Logger(RichLog):
+    """Custom logger extending RichLog."""
+
     def flush(self) -> None:
         pass
 
 
-class EventHighlighter(RegexHighlighter):
-    base_style = "sclh."
-    highlights = [pattern[0] for pattern in HIGHLIGHT_PATTERNS]
-
-
 def beautify_timestamp(timestamp: str) -> str:
+    """Convert UTC timestamp to local timezone."""
+
     utc_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
     utc_timestamp = utc_timestamp.replace(tzinfo=pytz.UTC)
 
@@ -287,34 +545,31 @@ def beautify_timestamp(timestamp: str) -> str:
 
 
 def beautify_entity_name(name: str) -> str:
+    """Remove numeric suffixes from entity names."""
+
     if match := re.match(r"([\w_-]+)_\d{10,}$", name):
         return match.group(1)
 
     return name
 
 
-def make_hyperlink(url: str, text: str) -> str:
-    return f"[link={url}]{text}[/link]"
+def should_create_player_link(player: str) -> bool:
+    """Check if player should have clickable link."""
 
+    if _ENABLE_ORGANIZATION_FETCHING and player in CACHE_ORGANIZATIONS.all():
+        data = CACHE_ORGANIZATIONS.get(player)
+        if time.time() < data["expiration"]:
+            return data.get("is_player", True)
 
-def make_player_link(player: str) -> str:
-    url = f"https://robertsspaceindustries.com/citizens/{player}"
+    if not _ENABLE_ORGANIZATION_FETCHING:
+        return False  # No links when fetching is disabled
 
-    return make_hyperlink(url, player)
-
-
-def make_org_link(org: str) -> str:
-    url = f"https://robertsspaceindustries.com/orgs/{org}"
-
-    return make_hyperlink(url, org)
-
-
-def strip_markup(text: str) -> str:
-    return re.sub(r"\[link=[^\]]*\]([^\[]*)\[/link\]", r"\1", text)
+    # Player not yet validated, don't create link
+    return False
 
 
 @catch_exception
-async def parse_event_on_client_spawned(log_line: str) -> str:
+async def parse_event_on_client_spawned(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         "<"
         + PATTERN_TIMESTAMP_RAW
@@ -325,13 +580,19 @@ async def parse_event_on_client_spawned(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        return f"{beautify_timestamp(data['timestamp'])} [Client Spawned]"
+        entities = [
+            TimestampEntity(data["timestamp"]),
+            TextEntity(" "),
+            CategoryEntity("Client Spawned"),
+        ]
+
+        return ParsedEvent(entities=entities)
 
     return None
 
 
 @catch_exception
-async def parse_event_connect_started(log_line: str) -> str:
+async def parse_event_connect_started(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         "<"
         + PATTERN_TIMESTAMP_RAW
@@ -342,13 +603,19 @@ async def parse_event_connect_started(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        return f"{beautify_timestamp(data['timestamp'])} [Connect Started]"
+        entities = [
+            TimestampEntity(data["timestamp"]),
+            TextEntity(" "),
+            CategoryEntity("Connect Started"),
+        ]
+
+        return ParsedEvent(entities=entities)
 
     return None
 
 
 @catch_exception
-async def parse_event_on_client_connected(log_line: str) -> str:
+async def parse_event_on_client_connected(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         "<"
         + PATTERN_TIMESTAMP_RAW
@@ -359,13 +626,19 @@ async def parse_event_on_client_connected(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        return f"{beautify_timestamp(data['timestamp'])} [Client Connected]"
+        return ParsedEvent(
+            entities=[
+                TimestampEntity(data["timestamp"]),
+                TextEntity(" "),
+                CategoryEntity("Client Connected"),
+            ]
+        )
 
     return None
 
 
 @catch_exception
-async def parse_event_request_quit_lobby(log_line: str) -> str:
+async def parse_event_request_quit_lobby(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         PATTERN_NOTICE
         + r"<\[EALobby\] EALobbyQuit> \[EALobby\]\[CEALobby::RequestQuitLobby\] (?P<requester>[\w_-]+) Requesting QuitLobby"
@@ -374,19 +647,24 @@ async def parse_event_request_quit_lobby(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        requester = beautify_entity_name(data["requester"])
-        requester_link = make_player_link(requester)
-        if organization := await extract_organization_name(requester):
-            org_link = make_org_link(organization)
-            requester_link = f"{requester_link} ({org_link})"
-
-        return f"{beautify_timestamp(data['timestamp'])} [Request Quit Lobby] Requester: {requester_link}"
+        return ParsedEvent(
+            entities=[
+                TimestampEntity(data["timestamp"]),
+                TextEntity(" "),
+                CategoryEntity("Request Quit Lobby"),
+                TextEntity(" "),
+                TextEntity("Requester: "),
+                await PlayerEntity.__async_init__(
+                    data["requester"], COLOUR_MAPPING["requester"]
+                ),
+            ]
+        )
 
     return None
 
 
 @catch_exception
-async def parse_event_actor_death(log_line: str) -> str:
+async def parse_event_actor_death(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         PATTERN_NOTICE
         + r"<Actor Death> CActor::Kill: '(?P<victim>[\w_-]+)' \[\d+\] in zone '(?P<zone>[\w_-]+)' killed by '(?P<killer>[\w_-]+)' \[\d+\] using '(?P<weapon>[\w_-]+)' \[Class (?P<weapon_class>[\w_-]+)\] with damage type '(?P<damage_type>[\w_-]+)' from direction x: (?P<direction_x>[-\d.]+), y: (?P<direction_y>[-\d.]+), z: (?P<direction_z>[-\d.]+)"
@@ -395,31 +673,35 @@ async def parse_event_actor_death(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        victim = beautify_entity_name(data["victim"])
-        victim_link = make_player_link(victim)
-        if organization := await extract_organization_name(victim):
-            org_link = make_org_link(organization)
-            victim_link = f"{victim_link} ({org_link})"
-
-        killer = beautify_entity_name(data["killer"])
-        killer_link = make_player_link(killer)
-        if organization := await extract_organization_name(killer):
-            org_link = make_org_link(organization)
-            killer_link = f"{killer_link} ({org_link})"
-
-        return (
-            f"{beautify_timestamp(data['timestamp'])} [Actor Death] "
-            f"Victim: {victim_link}, "
-            f"Killer: {killer_link}, "
-            f"Zone: {beautify_entity_name(data['zone'])}, "
-            f"Weapon: {beautify_entity_name(data['weapon'])}"
+        return ParsedEvent(
+            entities=[
+                TimestampEntity(data["timestamp"]),
+                TextEntity(" "),
+                CategoryEntity("Actor Death"),
+                TextEntity(" "),
+                TextEntity("Victim: "),
+                await PlayerEntity.__async_init__(
+                    data["victim"], COLOUR_MAPPING["victim"]
+                ),
+                TextEntity(", "),
+                TextEntity("Killer: "),
+                await PlayerEntity.__async_init__(
+                    data["killer"], COLOUR_MAPPING["killer"]
+                ),
+                TextEntity(", "),
+                TextEntity("Zone: "),
+                ZoneEntity(data["zone"]),
+                TextEntity(", "),
+                TextEntity("Weapon: "),
+                WeaponEntity(data["weapon"]),
+            ]
         )
 
     return None
 
 
 @catch_exception
-async def parse_event_vehicle_destruction(log_line: str) -> str:
+async def parse_event_vehicle_destruction(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         PATTERN_NOTICE
         + r"<Vehicle Destruction> CVehicle::OnAdvanceDestroyLevel: Vehicle '(?P<vehicle_name>[\w_-]+)' \[(?P<vehicle_id>\d+)\] in zone '(?P<zone>[\w_-]+)' \[pos x: (?P<pos_x>[-\d.]+), y: (?P<pos_y>[-\d.]+), z: (?P<pos_z>[-\d.]+) vel x: (?P<vel_x>[-\d.]+), y: (?P<vel_y>[-\d.]+), z: (?P<vel_z>[-\d.]+)\] driven by '(?P<driver>[\w_-]+)' \[(?P<driver_id>\d+)\] advanced from destroy level (?P<destroy_level_from>\d+) to (?P<destroy_level_to>\d+) caused by '(?P<causer>[\w_-]+)' \[(?P<causer_id>\d+)\] with '(?P<cause>[^\']+)'"
@@ -428,32 +710,38 @@ async def parse_event_vehicle_destruction(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        driver = beautify_entity_name(data["driver"])
-        driver_link = make_player_link(driver)
-        if organization := await extract_organization_name(driver):
-            org_link = make_org_link(organization)
-            driver_link = f"{driver_link} ({org_link})"
-
-        causer = beautify_entity_name(data["causer"])
-        causer_link = make_player_link(causer)
-        if organization := await extract_organization_name(causer):
-            org_link = make_org_link(organization)
-            causer_link = f"{causer_link} ({org_link})"
-
-        return (
-            f"{beautify_timestamp(data['timestamp'])} [Vehicle Destruction] "
-            f"Vehicle: {beautify_entity_name(data['vehicle_name'])}, "
-            f"Driver: {driver_link}, "
-            f"Caused By: {causer_link}, "
-            f"Cause: {data['cause']}, "
-            f"Zone: {beautify_entity_name(data['zone'])}"
+        return ParsedEvent(
+            entities=[
+                TimestampEntity(data["timestamp"]),
+                TextEntity(" "),
+                CategoryEntity("Vehicle Destruction"),
+                TextEntity(" "),
+                TextEntity("Vehicle: "),
+                VehicleEntity(data["vehicle_name"]),
+                TextEntity(", "),
+                TextEntity("Driver: "),
+                await PlayerEntity.__async_init__(
+                    data["driver"], COLOUR_MAPPING["driver"]
+                ),
+                TextEntity(", "),
+                TextEntity("Caused By: "),
+                await PlayerEntity.__async_init__(
+                    data["causer"], COLOUR_MAPPING["causer"]
+                ),
+                TextEntity(", "),
+                TextEntity("Cause: "),
+                CauseEntity(data["cause"]),
+                TextEntity(", "),
+                TextEntity("Zone: "),
+                ZoneEntity(data["zone"]),
+            ]
         )
 
     return None
 
 
 @catch_exception
-async def parse_event_requesting_transition(log_line: str) -> str:
+async def parse_event_requesting_transition(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         PATTERN_NOTICE
         + r"<Requesting Transition> (?P<component>[^\|]+) \| (?P<status>[^\|]+) \| (?P<current_system>[^\|]+) \| (?P<host>[\w_-]+) \[(?P<host_id>\d+)\] \| Transitioning from zone (?P<from_zone>[\w_-]+) in (?P<from_system>[\w_-]+) to zone (?P<to_zone>[\w_-]+) in (?P<to_system>[\w_-]+) \[(?P<team>[\w_-]+)\]\[(?P<category>\w+)\]"
@@ -462,17 +750,30 @@ async def parse_event_requesting_transition(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        return (
-            f"{beautify_timestamp(data['timestamp'])} [Requesting Transition] "
-            f"From: {data['from_system']} ({data['from_zone']}), "
-            f"To: {data['to_system']} ({data['to_zone']})"
+        return ParsedEvent(
+            entities=[
+                TimestampEntity(data["timestamp"]),
+                TextEntity(" "),
+                CategoryEntity("Requesting Transition"),
+                TextEntity(" "),
+                TextEntity("From: "),
+                SystemEntity(data["from_system"]),
+                TextEntity(" ("),
+                ZoneEntity(data["from_zone"]),
+                TextEntity("), "),
+                TextEntity("To: "),
+                SystemEntity(data["to_system"]),
+                TextEntity(" ("),
+                ZoneEntity(data["to_zone"]),
+                TextEntity(")"),
+            ]
         )
 
     return None
 
 
 @catch_exception
-async def parse_event_actor_state_corpse(log_line: str) -> str:
+async def parse_event_actor_state_corpse(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         PATTERN_NOTICE
         + r"<\[ActorState\] Corpse> \[ACTOR STATE\]\[SSCActorStateCVars::LogCorpse\] Player '(?P<player>[\w_-]+)' <remote client>: Running corpsify for corpse\. \[Team_ActorFeatures\]\[Actor\]"
@@ -481,19 +782,24 @@ async def parse_event_actor_state_corpse(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        player = beautify_entity_name(data["player"])
-        player_link = make_player_link(player)
-        if organization := await extract_organization_name(player):
-            org_link = make_org_link(organization)
-            player_link = f"{player_link} ({org_link})"
-
-        return f"{beautify_timestamp(data['timestamp'])} [Corpse] Player: {player_link}"
+        return ParsedEvent(
+            entities=[
+                TimestampEntity(data["timestamp"]),
+                TextEntity(" "),
+                CategoryEntity("Corpse"),
+                TextEntity(" "),
+                TextEntity("Player: "),
+                await PlayerEntity.__async_init__(
+                    data["player"], COLOUR_MAPPING["player"]
+                ),
+            ]
+        )
 
     return None
 
 
 @catch_exception
-async def parse_event_actor_stall(log_line: str) -> str:
+async def parse_event_actor_stall(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         r"<(?P<timestamp>[\d\-T:.Z]+)> \[Notice\] <Actor stall> Actor stall detected, Player: (?P<player>[\w_-]+), Type: (?P<type>\w+), Length: (?P<length>[\d.]+)\. \[Team_ActorTech\]\[Actor\]"
     )
@@ -501,37 +807,47 @@ async def parse_event_actor_stall(log_line: str) -> str:
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        player = beautify_entity_name(data["player"])
-        player_link = make_player_link(player)
-        if organization := await extract_organization_name(player):
-            org_link = make_org_link(organization)
-            player_link = f"{player_link} ({org_link})"
-
-        return f"{beautify_timestamp(data['timestamp'])} [Actor Stall] Player: {player_link}, Length: {round(float(data['length']), 1)}"
+        return ParsedEvent(
+            entities=[
+                TimestampEntity(data["timestamp"]),
+                TextEntity(" "),
+                CategoryEntity("Actor Stall"),
+                TextEntity(" "),
+                TextEntity("Player: "),
+                await PlayerEntity.__async_init__(
+                    data["player"], COLOUR_MAPPING["player"]
+                ),
+                TextEntity(", "),
+                TextEntity("Length: "),
+                NumberEntity(str(round(float(data["length"]), 1))),
+            ]
+        )
 
     return None
 
 
 @catch_exception
-async def parse_event_lost_spawn_reservation(log_line: str) -> str:
+async def parse_event_lost_spawn_reservation(log_line: str) -> ParsedEvent | None:
     pattern = re.compile(
         PATTERN_NOTICE
-        + r"<Spawn Flow> CSCPlayerPUSpawningComponent::UnregisterFromExternalSystems: "
-        + r"Player '(?P<player>[\w_-]+)' \[(?P<player_id>\d+)\] lost reservation for spawnpoint (?P<spawnpoint>\w+) "
-        + r"\[(?P<spawnpoint_id>\d+)\] at location (?P<location>\d+) "
-        + r"\[Team_ActorFeatures\]\[Gamerules\]"
+        + r"<Spawn Flow> CSCPlayerPUSpawningComponent::UnregisterFromExternalSystems: Player '(?P<player>[\w_-]+)' \[(?P<player_id>\d+)\] lost reservation for spawnpoint (?P<spawnpoint>\w+) \[(?P<spawnpoint_id>\d+)\] at location (?P<location>\d+) \[Team_ActorFeatures\]\[Gamerules\]"
     )
 
     if search := pattern.search(log_line):
         data = search.groupdict()
 
-        player = beautify_entity_name(data["player"])
-        player_link = make_player_link(player)
-        if organization := await extract_organization_name(player):
-            org_link = make_org_link(organization)
-            player_link = f"{player_link} ({org_link})"
-
-        return f"{beautify_timestamp(data['timestamp'])} [Spawn Lost] Player: {player_link}"
+        return ParsedEvent(
+            entities=[
+                TimestampEntity(data["timestamp"]),
+                TextEntity(" "),
+                CategoryEntity("Spawn Lost"),
+                TextEntity(" "),
+                TextEntity("Player: "),
+                await PlayerEntity.__async_init__(
+                    data["player"], COLOUR_MAPPING["player"]
+                ),
+            ]
+        )
 
     return None
 
@@ -550,176 +866,134 @@ EVENT_PARSERS = {
 }
 
 
-class OverlayWindow:
-    """
-    A transparent overlay window that displays log lines as floating text.
-    Uses tkinter with color key transparency to show text without background.
-    """
+class OverlayWindow(QWidget):
+    """Transparent overlay window for displaying log events."""
 
-    def __init__(self, max_lines: int = 3, display: int = 0, font_size: int = 10):
-        """
-        Initialize overlay window.
-
-        Args:
-            max_lines: Maximum number of lines to display
-            display: Display number for multi-monitor setups
-            font_size: Font size for displayed text
-        """
+    def __init__(self, max_lines: int = 3, display: int = 0, font_size: int = 16):
+        super().__init__()
         self.max_lines = max_lines
         self.display = display
         self.font_size = font_size
         self.lines = deque(maxlen=max_lines)
-        self.root = None
-        self.canvas = None
-        self.text_items = []
         self.running = False
+
+        self.drag_start_position = None
+        self.drag_offset = None
+
+        self.fixed_height = self.max_lines * (self.font_size + 5) + 40
+
+        self.setup_widget()
+
+    def setup_widget(self):
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        self.setStyleSheet("""
+            QWidget {
+                border-top: 3px solid rgba(255, 255, 255, 0.4);
+                background-color: transparent;
+            }
+        """)
+
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.drag_indicator = QLabel()
+        self.drag_indicator.setFixedHeight(4)
+        self.drag_indicator.setStyleSheet("""
+            QLabel {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(30, 144, 255, 0.0),
+                    stop:0.5 rgba(30, 144, 255, 0.75),
+                    stop:1 rgba(30, 144, 255, 0.0));
+                border: none;
+            }
+        """)
+
+        self.label = QLabel()
+        self.label.setTextFormat(Qt.RichText)
+        self.label.setOpenExternalLinks(True)
+        self.label.setWordWrap(True)
+        self.label.setStyleSheet(f"""
+            QLabel {{
+                background-color: transparent;
+                color: white;
+                font-family: Consolas, Terminal, monospace;
+                font-size: {self.font_size}px;
+                font-weight: bold;
+                border: none;
+            }}
+            QLabel a {{
+                text-decoration: underline;
+            }}
+        """)
+
+        main_layout.addWidget(self.drag_indicator)
+        main_layout.addWidget(self.label)
+        self.setLayout(main_layout)
+
+        self.stay_on_top_timer = QTimer()
+        self.stay_on_top_timer.timeout.connect(lambda: self.raise_() if self.running else None)
+        self.stay_on_top_timer.start(1000)
 
     def start(self):
         self.running = True
-        self.root = tk.Tk()
-        self.root.title("Star Citizen Log Overlay")
+        self.setWindowTitle(f"[ {__application__} - Overlay - {__version__} ]")
 
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self.root.lift()
-        self.root.wm_attributes("-topmost", 1)
+        if application := QApplication.instance():
+            screens = application.screens()
 
-        transparent_color = "#FF00FF"
-        self.root.configure(bg=transparent_color)
-        self.root.attributes("-transparentcolor", transparent_color)
+            if self.display < len(screens):
+                target_screen = screens[self.display]
+            else:
+                target_screen = application.primaryScreen()
 
-        self.root.update_idletasks()
+            screen_geometry = target_screen.geometry()
 
-        screen_width = self.root.winfo_screenwidth()
+            window_width = int(screen_geometry.width() * 2 / 3)
 
-        x_offset = screen_width * self.display if self.display > 0 else 0
+            self.setFixedSize(window_width, self.fixed_height)
 
-        window_width = int(screen_width * 0.66)
-        window_height = self.max_lines * (self.font_size + 5) + 20
+            x = screen_geometry.x() + int((screen_geometry.width() - window_width) / 2)
+            y = screen_geometry.y()
 
-        x = int((screen_width - window_width) / 2) + x_offset
-        y = 10
+            self.move(x, y)
 
-        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        self.show()
 
-        self.root.update_idletasks()
-
-        self.canvas = tk.Canvas(
-            self.root,
-            bg=transparent_color,
-            highlightthickness=0,
-            borderwidth=0,
-        )
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-
-        self.root.bind("<Escape>", lambda _: self.stop())
-        self.root.bind("<Button-1>", self._start_move)
-        self.root.bind("<B1-Motion>", self._on_move)
-        self.root.protocol("WM_DELETE_WINDOW", self.stop)
-
-        self._keep_on_top()
-
-    def _start_move(self, event):
-        self.x = event.x
-        self.y = event.y
-
-    def _on_move(self, event):
-        deltax = event.x - self.x
-        deltay = event.y - self.y
-        x = self.root.winfo_x() + deltax
-        y = self.root.winfo_y() + deltay
-        self.root.geometry(f"+{x}+{y}")
-
-    def _keep_on_top(self):
-        if self.running and self.root:
-            self.root.lift()
-            self.root.attributes("-topmost", True)
-            self.root.after(1000, self._keep_on_top)
-
-    def _colorize_text(self, text: str):
-        segments = []
-        matches = []
-
-        for pattern_data in HIGHLIGHT_PATTERNS:
-            pattern = pattern_data[0]
-            for match in re.finditer(pattern, text):
-                for group_name, group_value in match.groupdict().items():
-                    if group_value is not None:
-                        color_key = group_name
-                        start_pos = match.start(group_name)
-                        end_pos = match.end(group_name)
-                        matches.append((start_pos, end_pos, group_value, color_key))
-
-        matches.sort(key=lambda x: x[0])
-
-        current_pos = 0
-        for start, end, matched_text, color_key in matches:
-            if start > current_pos:
-                segments.append((text[current_pos:start], COLOUR_MAPPING["default"]))
-
-            color = COLOUR_MAPPING.get(color_key, COLOUR_MAPPING["default"])
-            segments.append((matched_text, color))
-            current_pos = end
-
-        if current_pos < len(text):
-            segments.append((text[current_pos:], COLOUR_MAPPING["default"]))
-
-        if not segments:
-            segments = [(text, COLOUR_MAPPING["default"])]
-
-        return segments
-
-    def add_line(self, line: str):
-        if not self.root:
+    def write(self, line: str):
+        """Write line to overlay."""
+        if not self.running:
             return
 
         self.lines.append(line)
-        self._update_display()
+        html_content = "<br>".join(self.lines)
+        self.label.setText(html_content)
 
-    def _update_display(self):
-        if not self.canvas:
-            return
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_position = event.globalPos()
+            self.drag_offset = event.pos()
 
-        for item in self.text_items:
-            self.canvas.delete(item)
-        self.text_items.clear()
+    def mouseMoveEvent(self, event):
+        if (
+            self.drag_start_position is not None
+            and self.drag_offset is not None
+            and event.buttons() == Qt.LeftButton
+        ):
+            new_pos = event.globalPos() - self.drag_offset
+            self.move(new_pos)
 
-        self._font = tkFont.Font(family="Terminal", size=self.font_size, weight="bold")
-        font_tuple = ("Terminal", self.font_size, "bold")
-
-        y_pos = 10
-        for line in self.lines:
-            segments = self._colorize_text(line)
-
-            x_pos = 10
-            for text_segment, color in segments:
-                if text_segment:
-                    text_item = self.canvas.create_text(
-                        x_pos,
-                        y_pos,
-                        text=text_segment,
-                        font=font_tuple,
-                        fill=color,
-                        anchor="nw",
-                    )
-                    self.text_items.append(text_item)
-
-                    x_pos += self._font.measure(text_segment)
-
-            y_pos += self.font_size + 5
-
-    def stop(self):
-        self.running = False
-        if self.root:
-            self.root.quit()
-            self.root.destroy()
-
-    def mainloop(self):
-        if self.root:
-            self.root.mainloop()
+    def mouseReleaseEvent(self, event):
+        self.drag_start_position = None
+        self.drag_offset = None
 
 
 class StarCitizenLogMonitorApp(App):
+    """Main Textual application for log monitoring."""
+
     def __init__(
         self,
         log_file_path: str,
@@ -742,10 +1016,7 @@ class StarCitizenLogMonitorApp(App):
 
         self.log_file_size = os.path.getsize(self.log_file_path)
 
-        self.console = Console(theme=THEME_DEFAULT)
-
-        self.logger = Logger(highlight=True, markup=True)
-        self.logger.highlighter = EventHighlighter()
+        self.logger = Logger(highlight=False, markup=True)
 
         self.worker: Worker | None = None
 
@@ -753,26 +1024,27 @@ class StarCitizenLogMonitorApp(App):
         yield self.logger
 
     def on_mount(self):
-        self.logger.write(f"[ {self.__class__.__name__} - {__version__} ]")
+        # Set screen background programmatically
+        self.screen.styles.background = "#111111"
+        self.logger.styles.background = "#111111"
+
+        self.logger.write(f"[ {__application__} - {__version__} ]")
         self.worker = self.run_worker(self.monitor())
 
     async def process_line(self, line: str):
         if not self.show_parsed_events_only:
             self.logger.write(line)
             if self.overlay_window:
-                self.overlay_window.add_line(line.strip())
+                self.overlay_window.write(line)
 
         for event_key, event_parser in EVENT_PARSERS.items():
             if parsed_event := await event_parser(line):
-                # Add to console if event matches console filters
                 if event_key in self.event_filters:
-                    self.logger.write(parsed_event)
+                    self.logger.write(parsed_event.render_textual())
 
-                # Add to overlay if event matches overlay filters
                 if self.overlay_window and event_key in self.overlay_event_filters:
-                    self.overlay_window.add_line(strip_markup(parsed_event))
+                    self.overlay_window.write(parsed_event.render_overlay())
 
-                # Return after first successful parse to avoid double processing
                 if event_key in self.event_filters or (
                     self.overlay_window and event_key in self.overlay_event_filters
                 ):
@@ -797,7 +1069,7 @@ class StarCitizenLogMonitorApp(App):
 
                         if size < self.log_file_size:
                             self.logger.write(
-                                f"[ {self.__class__.__name__} - {__version__} - Restarting... ]"
+                                f"[ {__application__} - {__version__} - Restarting... ]"
                             )
                             break
 
@@ -863,8 +1135,8 @@ class StarCitizenLogMonitorApp(App):
 )
 @click.option(
     "--overlay-font-size",
-    default=10,
-    help="Font size for overlay text (default: 10)",
+    default=16,
+    help="Font size for overlay text (default: 16)",
 )
 def main(
     log_file_path: str,
@@ -882,13 +1154,14 @@ def main(
     _ENABLE_ORGANIZATION_FETCHING = enable_organization_fetching
 
     if overlay:
+        application = QApplication([])
+
         overlay_window = OverlayWindow(
             overlay_lines, overlay_display, overlay_font_size
         )
         overlay_window.start()
 
-        overlay_window.add_line("Star Citizen Log Overlay Active")
-        overlay_window.add_line("Waiting for log events...")
+        overlay_window.write(f"[ {__application__} - Overlay - {__version__} ]")
 
         app = StarCitizenLogMonitorApp(
             log_file_path, show_parsed_events_only, event, overlay_event, overlay_window
@@ -897,7 +1170,7 @@ def main(
         app_thread.start()
 
         try:
-            overlay_window.mainloop()
+            application.exec()
         finally:
             overlay_window.stop()
     else:
