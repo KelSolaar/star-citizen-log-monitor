@@ -7,6 +7,7 @@
 #   "pickledb==1.0",
 #   "PySide6==6.9.2",
 #   "pytz==2025.2",
+#   "qasync==0.28.0",
 #   "textual==2.1.2",
 #   "tzlocal==5.2",
 # ]
@@ -27,14 +28,13 @@ import os
 import re
 import time
 import traceback
+from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from threading import Thread
 from typing import Callable, List
-from abc import ABC, abstractmethod
 
 import aiofiles
 import aiohttp
@@ -43,8 +43,9 @@ import pytz
 import tzlocal
 from bs4 import BeautifulSoup
 from pickledb import PickleDB
-from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from qasync import QEventLoop
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog
 from textual.worker import Worker
@@ -57,7 +58,7 @@ __status__ = "Production"
 
 __application__ = "Star Citizen Log Monitor"
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 __all__ = [
     "LOCAL_TIMEZONE",
@@ -78,7 +79,7 @@ __all__ = [
     "beautify_entity_name",
     "Logger",
     "OverlayWindow",
-    "StarCitizenLogMonitorApp",
+    "StarCitizenLogMonitor",
     "parse_event_on_client_spawned",
     "parse_event_connect_started",
     "parse_event_on_client_connected",
@@ -443,7 +444,10 @@ def catch_exception(function: Callable) -> Callable:
             # Return a ParsedEvent for the exception instead of a string
             return ParsedEvent(
                 entities=[
-                    TextEntity(f"Exception in {function.__name__}: {tb}", COLOUR_MAPPING["error"])
+                    TextEntity(
+                        f"Exception in {function.__name__}: {tb}",
+                        COLOUR_MAPPING["error"],
+                    )
                 ]
             )
 
@@ -935,7 +939,9 @@ class OverlayWindow(QWidget):
         self.setLayout(main_layout)
 
         self.stay_on_top_timer = QTimer()
-        self.stay_on_top_timer.timeout.connect(lambda: self.raise_() if self.running else None)
+        self.stay_on_top_timer.timeout.connect(
+            lambda: self.raise_() if self.running else None
+        )
         self.stay_on_top_timer.start(1000)
 
     def start(self):
@@ -972,6 +978,10 @@ class OverlayWindow(QWidget):
         html_content = "<br>".join(self.lines)
         self.label.setText(html_content)
 
+    def stop(self):
+        """Stop the overlay."""
+        self.running = False
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_start_position = event.globalPos()
@@ -991,7 +1001,7 @@ class OverlayWindow(QWidget):
         self.drag_offset = None
 
 
-class StarCitizenLogMonitorApp(App):
+class StarCitizenLogMonitor(App):
     """Main Textual application for log monitoring."""
 
     def __init__(
@@ -1163,21 +1173,20 @@ def main(
 
         overlay_window.write(f"[ {__application__} - Overlay - {__version__} ]")
 
-        app = StarCitizenLogMonitorApp(
+        star_citizen_log_monitor = StarCitizenLogMonitor(
             log_file_path, show_parsed_events_only, event, overlay_event, overlay_window
         )
-        app_thread = Thread(target=app.run, daemon=True)
-        app_thread.start()
 
-        try:
-            application.exec()
-        finally:
-            overlay_window.stop()
+        event_loop = QEventLoop(application)
+        asyncio.set_event_loop(event_loop)
+
+        with event_loop:
+            event_loop.run_until_complete(star_citizen_log_monitor.run_async())
     else:
-        app = StarCitizenLogMonitorApp(
+        star_citizen_log_monitor = StarCitizenLogMonitor(
             log_file_path, show_parsed_events_only, event, overlay_event
         )
-        app.run()
+        star_citizen_log_monitor.run()
 
 
 if __name__ == "__main__":
