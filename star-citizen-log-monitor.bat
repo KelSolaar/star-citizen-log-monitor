@@ -12,3 +12,5 @@ REM Run it!
 
 REM Alternative launch from Github:
 REM %UV_PATH% run https://raw.githubusercontent.com/KelSolaar/star-citizen-log-monitor/refs/heads/master/star_citizen_log_monitor.py --log-file-path=%SC_DIR%\Game.log --overlay --overlay-event actor-death --overlay-event vehicle-destruction --overlay-event vehicle-destruction --overlay-event actor-state-corpse --overlay-event actor-stall
+
+pause
